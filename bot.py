@@ -27,7 +27,8 @@ STATE_FILE = DATA_DIR / "state.json"
 STATE_BACKUP_FILE = DATA_DIR / "state.backup.json"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-SOURCE_CHANNEL_ID = os.getenv("SOURCE_CHANNEL_ID", "").strip()
+SOURCE_CHANNEL_IDS_RAW = os.getenv("SOURCE_CHANNEL_IDS", os.getenv("SOURCE_CHANNEL_ID", "")).strip()
+SOURCE_CHANNEL_IDS = [item.strip() for item in SOURCE_CHANNEL_IDS_RAW.split(",") if item.strip()]
 THREADS_USER_ID = os.getenv("THREADS_USER_ID", "").strip()
 THREADS_ACCESS_TOKEN = os.getenv("THREADS_ACCESS_TOKEN", "").strip()
 THREADS_API_BASE = os.getenv("THREADS_API_BASE", "https://graph.threads.net/v1.0").rstrip("/")
@@ -77,7 +78,7 @@ DAY_ALIASES = {
 def require_env() -> None:
     required = {
         "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
-        "SOURCE_CHANNEL_ID": SOURCE_CHANNEL_ID,
+        "SOURCE_CHANNEL_IDS": SOURCE_CHANNEL_IDS_RAW,
         "THREADS_USER_ID": THREADS_USER_ID,
         "THREADS_ACCESS_TOKEN": THREADS_ACCESS_TOKEN,
     }
@@ -124,9 +125,12 @@ def save_state() -> None:
 
 
 def message_matches_source(message: Message) -> bool:
-    source = SOURCE_CHANNEL_ID.strip()
     chat = message.chat
-    return str(chat.id) == source or bool(chat.username and f"@{chat.username}" == source)
+    candidates = {str(chat.id)}
+    if chat.username:
+        candidates.add(f"@{chat.username}")
+        candidates.add(chat.username)
+    return any(source in candidates for source in SOURCE_CHANNEL_IDS)
 
 
 def has_unsupported_media(message: Message) -> bool:
@@ -453,7 +457,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, handle_channel_post))
 
     scheduler = configure_scheduler()
-    logger.info("threads_drea_bot started. Listening to %s", SOURCE_CHANNEL_ID)
+    logger.info("threads_drea_bot started. Listening to %s", ", ".join(SOURCE_CHANNEL_IDS))
     try:
         app.run_polling(allowed_updates=["channel_post"])
     finally:

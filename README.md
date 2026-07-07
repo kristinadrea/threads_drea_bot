@@ -6,7 +6,7 @@ It is designed for original text posts first. Audio, video, documents, voice mes
 
 ## What It Does
 
-- Watches one Telegram source channel.
+- Watches one or more Telegram source channels.
 - Crossposts text posts to Threads.
 - Splits long Telegram posts into a Threads chain.
 - Skips audio, video, documents, voice messages, and unsupported media.
@@ -16,7 +16,7 @@ It is designed for original text posts first. Audio, video, documents, voice mes
 
 ## Setup
 
-1. Create a bot with BotFather and add it as admin to the Telegram source channel.
+1. Create a bot with BotFather and add it as admin to every Telegram source channel.
 2. Copy `.env.example` to `.env` and fill in secrets.
 3. Install dependencies:
 
@@ -34,7 +34,7 @@ python3 -m venv .venv
 ## Required Environment Variables
 
 - `TELEGRAM_BOT_TOKEN`: Telegram bot token.
-- `SOURCE_CHANNEL_ID`: Telegram channel id or username to listen to.
+- `SOURCE_CHANNEL_IDS`: comma-separated Telegram channel ids or usernames to listen to.
 - `THREADS_USER_ID`: Threads user id from Meta.
 - `THREADS_ACCESS_TOKEN`: Threads access token.
 
