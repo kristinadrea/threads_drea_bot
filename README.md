@@ -9,11 +9,12 @@ It is designed for original text and image posts. Audio, video, documents, voice
 - Watches one or more Telegram source channels.
 - Crossposts text posts to Threads.
 - Crossposts Telegram photo posts to Threads when `CROSSPOST_IMAGES=true`.
+- Optionally crossposts the same Telegram posts to Bluesky.
 - Uploads Telegram photos to Cloudflare R2 before publishing, because Threads requires a public image URL.
 - Splits long Telegram posts into a Threads chain.
 - Skips audio, video, documents, voice messages, and unsupported media.
 - Optionally requires a marker tag, for example `#threads`, before crossposting.
-- Can post the latest remembered Castaneda channel quote to Threads once a week at a random daytime US time.
+- Can post the latest remembered Castaneda channel quote once a week at a random daytime US time.
 
 ## Setup
 
@@ -48,9 +49,27 @@ python3 -m venv .venv
 - `ADD_TELEGRAM_LINK_EVERY_N_POSTS=0`: set to a number like `7` to add the Telegram link occasionally.
 - `CROSSPOST_CASTANEDA_IMMEDIATELY=false`: remember Castaneda channel posts for weekly publishing instead of crossposting every Castaneda post immediately.
 
+## Bluesky Crossposting
+
+Bluesky publishing uses the official AT Protocol endpoints: create a session with an app password, upload an image blob when needed, and create `app.bsky.feed.post` records. It can be toggled from Telegram with `/bluesky`.
+
+Required settings when Bluesky is enabled:
+
+```env
+BLUESKY_ENABLED=false
+BLUESKY_SERVICE=https://bsky.social
+BLUESKY_HANDLE=your-handle.bsky.social
+BLUESKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
+BLUESKY_MAX_CHARS=280
+BLUESKY_MAX_PARTS=8
+BLUESKY_TAGS=Castaneda,Spirituality,Quotes
+```
+
+Use an app password from Bluesky settings, not your main account password. `BLUESKY_TAGS` is optional; keep it to a few relevant tags. Images larger than `BLUESKY_MAX_IMAGE_BYTES` are skipped for Bluesky, while the text still publishes.
+
 ## Weekly Castaneda
 
-When `CASTANEDA_CHANNEL_ID` is one of the source channels, the bot remembers the latest Castaneda channel post it sees, including its R2 image URL when image crossposting is enabled. If weekly Castaneda is enabled, the bot posts that latest remembered quote to Threads every Thursday at a random time between `WEEKLY_CASTANEDA_START_TIME` and `WEEKLY_CASTANEDA_END_TIME` in `TIMEZONE`. The final Threads part includes `More daily quotes in Telegram:` plus `CASTANEDA_TELEGRAM_LINK`.
+When `CASTANEDA_CHANNEL_ID` is one of the source channels, the bot remembers the latest Castaneda channel post it sees, including its R2 image URL when image crossposting is enabled. If weekly Castaneda is enabled, the bot posts that latest remembered quote every Thursday at a random time between `WEEKLY_CASTANEDA_START_TIME` and `WEEKLY_CASTANEDA_END_TIME` in `TIMEZONE`. The final Castaneda part includes `More daily quotes in Telegram:` plus `CASTANEDA_TELEGRAM_LINK`.
 
 ```env
 CASTANEDA_CHANNEL_ID=-1004445804313
@@ -69,6 +88,7 @@ CROSSPOST_CASTANEDA_IMMEDIATELY=false
 The command menu is scoped to `ADMIN_USER_ID`; global bot commands are cleared on startup.
 
 - `/threads`: toggle Threads posting on/off.
+- `/bluesky`: toggle Bluesky posting on/off.
 - `/weekly_castaneda`: toggle weekly Castaneda posting on/off.
 - `/threads_parts`: ask for and save the max number of parts per Threads chain. You can also send `/threads_parts 8`.
 - `/threads_status`: show current state, including max thread parts.

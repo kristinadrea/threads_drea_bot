@@ -51,6 +51,16 @@ THREADS_USER_ID = os.getenv("THREADS_USER_ID", "").strip()
 THREADS_ACCESS_TOKEN = os.getenv("THREADS_ACCESS_TOKEN", "").strip()
 THREADS_API_BASE = os.getenv("THREADS_API_BASE", "https://graph.threads.net/v1.0").rstrip("/")
 
+BLUESKY_SERVICE = os.getenv("BLUESKY_SERVICE", "https://bsky.social").rstrip("/")
+BLUESKY_HANDLE = os.getenv("BLUESKY_HANDLE", "").strip()
+BLUESKY_APP_PASSWORD = os.getenv("BLUESKY_APP_PASSWORD", "").strip()
+BLUESKY_ENABLED_DEFAULT = os.getenv("BLUESKY_ENABLED", "false").lower() == "true"
+BLUESKY_MAX_CHARS = int(os.getenv("BLUESKY_MAX_CHARS", "280"))
+BLUESKY_MAX_PARTS = int(os.getenv("BLUESKY_MAX_PARTS", "8"))
+BLUESKY_IMAGE_ALT = os.getenv("BLUESKY_IMAGE_ALT", "").strip()
+BLUESKY_MAX_IMAGE_BYTES = int(os.getenv("BLUESKY_MAX_IMAGE_BYTES", str(2 * 1024 * 1024)))
+BLUESKY_TAGS = [tag.strip() for tag in os.getenv("BLUESKY_TAGS", "").split(",") if tag.strip()]
+
 MAX_THREAD_CHARS = int(os.getenv("MAX_THREAD_CHARS", "480"))
 MAX_THREAD_PARTS = int(os.getenv("MAX_THREAD_PARTS", "5"))
 THREADS_REPLY_DELAY_SECONDS = float(os.getenv("THREADS_REPLY_DELAY_SECONDS", "4"))
@@ -142,6 +152,7 @@ state = load_json(
         "weekly_castaneda_next_run": None,
         "latest_castaneda_post": None,
         "threads_enabled": THREADS_ENABLED_DEFAULT,
+        "bluesky_enabled": BLUESKY_ENABLED_DEFAULT,
         "max_thread_parts": MAX_THREAD_PARTS,
         "awaiting_threads_parts_user_id": None,
     },
@@ -153,6 +164,7 @@ state.setdefault("weekly_castaneda_enabled", WEEKLY_CASTANEDA_ENABLED)
 state.setdefault("weekly_castaneda_next_run", None)
 state.setdefault("latest_castaneda_post", None)
 state.setdefault("threads_enabled", THREADS_ENABLED_DEFAULT)
+state.setdefault("bluesky_enabled", BLUESKY_ENABLED_DEFAULT)
 state.setdefault("max_thread_parts", MAX_THREAD_PARTS)
 state.setdefault("awaiting_threads_parts_user_id", None)
 
@@ -168,6 +180,19 @@ def threads_enabled() -> bool:
 def set_threads_enabled(enabled: bool) -> None:
     state["threads_enabled"] = enabled
     save_state()
+
+
+def bluesky_enabled() -> bool:
+    return bool(state.get("bluesky_enabled", BLUESKY_ENABLED_DEFAULT))
+
+
+def set_bluesky_enabled(enabled: bool) -> None:
+    state["bluesky_enabled"] = enabled
+    save_state()
+
+
+def bluesky_configured() -> bool:
+    return bool(BLUESKY_HANDLE and BLUESKY_APP_PASSWORD)
 
 
 def is_admin_update(update: Update) -> bool:
@@ -205,9 +230,12 @@ def set_weekly_castaneda_enabled(enabled: bool) -> None:
 
 def threads_status_text() -> str:
     status = "ON" if threads_enabled() else "OFF"
+    bluesky_status = "ON" if bluesky_enabled() else "OFF"
+    if bluesky_enabled() and not bluesky_configured():
+        bluesky_status += " (missing handle/app password)"
     weekly_status = "ON" if weekly_castaneda_enabled() else "OFF"
     next_run = format_weekly_castaneda_next_run()
-    return f"Threads posting: {status}\nMax thread parts: {get_max_thread_parts()}\nWeekly Castaneda: {weekly_status}\nNext Castaneda: {next_run}"
+    return f"Threads posting: {status}\nBluesky posting: {bluesky_status}\nMax thread parts: {get_max_thread_parts()}\nWeekly Castaneda: {weekly_status}\nNext Castaneda: {next_run}"
 
 
 async def reject_non_admin(update: Update) -> bool:
@@ -229,6 +257,13 @@ async def weekly_castaneda_command(update: Update, context: ContextTypes.DEFAULT
     if await reject_non_admin(update):
         return
     set_weekly_castaneda_enabled(not weekly_castaneda_enabled())
+    await update.effective_message.reply_text(threads_status_text())
+
+
+async def bluesky_toggle_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_non_admin(update):
+        return
+    set_bluesky_enabled(not bluesky_enabled())
     await update.effective_message.reply_text(threads_status_text())
 
 
@@ -309,6 +344,7 @@ async def setup_bot_commands(app: Application) -> None:
 
     commands = [
         BotCommand("threads", "Threads on/off"),
+        BotCommand("bluesky", "Bluesky on/off"),
         BotCommand("weekly_castaneda", "Weekly Castaneda on/off"),
         BotCommand("threads_parts", "Set max thread parts"),
         BotCommand("threads_status", "Threads status"),
@@ -369,7 +405,12 @@ def should_crosspost_text(text: str) -> bool:
     return True
 
 
-def append_suffix_to_thread_parts(parts: list[str], suffix: str, limit: int = MAX_THREAD_CHARS) -> list[str]:
+def append_suffix_to_thread_parts(
+    parts: list[str],
+    suffix: str,
+    limit: int = MAX_THREAD_CHARS,
+    max_parts: Optional[int] = None,
+) -> list[str]:
     if not suffix:
         return parts
     parts = list(parts) or [""]
@@ -377,7 +418,8 @@ def append_suffix_to_thread_parts(parts: list[str], suffix: str, limit: int = MA
         parts[-1] = parts[-1].rstrip() + suffix
         return parts
 
-    max_parts = get_max_thread_parts()
+    if max_parts is None:
+        max_parts = get_max_thread_parts()
     if len(parts) < max_parts and len(suffix.strip()) <= limit:
         parts.append(suffix.strip())
         return parts
@@ -682,6 +724,113 @@ async def publish_threads_chain_with_progress(
     return post_ids
 
 
+
+
+def append_bluesky_tags(parts: list[str]) -> list[str]:
+    if not BLUESKY_TAGS:
+        return parts
+    tags = " ".join(tag if tag.startswith("#") else f"#{tag}" for tag in BLUESKY_TAGS)
+    suffix = f"\n\n{tags}"
+    return append_suffix_to_thread_parts(parts, suffix, limit=BLUESKY_MAX_CHARS, max_parts=BLUESKY_MAX_PARTS)
+
+
+def split_text_for_bluesky(text: str, source_url: Optional[str] = None) -> list[str]:
+    parts = split_text_for_threads(
+        text,
+        limit=BLUESKY_MAX_CHARS,
+        max_parts=BLUESKY_MAX_PARTS,
+        source_url=source_url,
+    )
+    return append_bluesky_tags(parts)
+
+
+def create_bluesky_session() -> dict:
+    if not bluesky_configured():
+        raise RuntimeError("Bluesky credentials are missing: add BLUESKY_HANDLE and BLUESKY_APP_PASSWORD")
+    response = requests.post(
+        f"{BLUESKY_SERVICE}/xrpc/com.atproto.server.createSession",
+        json={"identifier": BLUESKY_HANDLE, "password": BLUESKY_APP_PASSWORD},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def download_image_for_bluesky(image_url: str) -> Optional[tuple[bytes, str]]:
+    response = requests.get(image_url, timeout=30)
+    response.raise_for_status()
+    content = response.content
+    if len(content) > BLUESKY_MAX_IMAGE_BYTES:
+        logger.warning("Skipping Bluesky image: %s bytes is larger than %s", len(content), BLUESKY_MAX_IMAGE_BYTES)
+        return None
+    content_type = response.headers.get("content-type", "image/jpeg").split(";", 1)[0]
+    if content_type not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
+        content_type = "image/jpeg"
+    return content, content_type
+
+
+def upload_bluesky_image(session: dict, image_url: Optional[str]) -> Optional[dict]:
+    if not image_url:
+        return None
+    downloaded = download_image_for_bluesky(image_url)
+    if not downloaded:
+        return None
+    content, content_type = downloaded
+    response = requests.post(
+        f"{BLUESKY_SERVICE}/xrpc/com.atproto.repo.uploadBlob",
+        headers={"Authorization": f"Bearer {session['accessJwt']}", "Content-Type": content_type},
+        data=content,
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json().get("blob")
+
+
+def create_bluesky_record(session: dict, text: str, image_blob: Optional[dict] = None, reply: Optional[dict] = None) -> dict:
+    record = {
+        "$type": "app.bsky.feed.post",
+        "text": text,
+        "createdAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    if image_blob:
+        record["embed"] = {
+            "$type": "app.bsky.embed.images",
+            "images": [{"alt": BLUESKY_IMAGE_ALT, "image": image_blob}],
+        }
+    if reply:
+        record["reply"] = reply
+
+    response = requests.post(
+        f"{BLUESKY_SERVICE}/xrpc/com.atproto.repo.createRecord",
+        headers={"Authorization": f"Bearer {session['accessJwt']}"},
+        json={"repo": session["did"], "collection": "app.bsky.feed.post", "record": record},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def publish_bluesky_chain(parts: Iterable[str], image_url: Optional[str] = None) -> list[str]:
+    if not bluesky_enabled() or not bluesky_configured():
+        return []
+    parts = list(parts)
+    session = create_bluesky_session()
+    image_blob = upload_bluesky_image(session, image_url)
+    post_uris: list[str] = []
+    root_ref: Optional[dict] = None
+    parent_ref: Optional[dict] = None
+
+    for index, part in enumerate(parts):
+        logger.info("Publishing Bluesky part %s/%s (%s chars)", index + 1, len(parts), len(part))
+        reply = {"root": root_ref, "parent": parent_ref} if root_ref and parent_ref else None
+        created = create_bluesky_record(session, part, image_blob=image_blob if index == 0 else None, reply=reply)
+        ref = {"uri": created["uri"], "cid": created["cid"]}
+        if root_ref is None:
+            root_ref = ref
+        parent_ref = ref
+        post_uris.append(created["uri"])
+    return post_uris
+
 def publication_preview(text: str) -> str:
     first_line = next((line.strip() for line in text.splitlines() if line.strip()), "[image only]")
     if len(first_line) > 140:
@@ -828,8 +977,12 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.info("Stored Castaneda message %s for weekly posting only", message.message_id)
             return
 
-    if not threads_enabled():
-        logger.info("Skipping Telegram message %s: Threads posting is disabled", message.message_id)
+    bluesky_active = bluesky_enabled() and bluesky_configured()
+    if bluesky_enabled() and not bluesky_configured():
+        logger.warning("Skipping Bluesky for Telegram message %s: missing handle/app password", message.message_id)
+
+    if not threads_enabled() and not bluesky_active:
+        logger.info("Skipping Telegram message %s: Threads and Bluesky posting are disabled", message.message_id)
         remember_message(message.message_id)
         return
 
@@ -838,18 +991,26 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     uploaded_count = 0
     total_parts = 0
     try:
-        parts = maybe_add_telegram_link(split_text_for_threads(text, source_url=telegram_post_url(message)))
-        total_parts = len(parts)
-        logger.info("Telegram message %s split into %s Threads part(s): %s", message.message_id, total_parts, [len(part) for part in parts])
-        progress_message = await send_publication_progress(context, preview, total_parts)
+        post_ids: list[str] = []
+        bluesky_post_uris: list[str] = []
+        if threads_enabled():
+            parts = maybe_add_telegram_link(split_text_for_threads(text, source_url=telegram_post_url(message)))
+            total_parts = len(parts)
+            logger.info("Telegram message %s split into %s Threads part(s): %s", message.message_id, total_parts, [len(part) for part in parts])
+            progress_message = await send_publication_progress(context, preview, total_parts)
 
-        async def report_progress(uploaded: int, total: int, post_id: str) -> None:
-            nonlocal uploaded_count
-            uploaded_count = uploaded
-            await update_publication_progress(progress_message, preview, total, uploaded)
+            async def report_progress(uploaded: int, total: int, post_id: str) -> None:
+                nonlocal uploaded_count
+                uploaded_count = uploaded
+                await update_publication_progress(progress_message, preview, total, uploaded)
 
-        post_ids = await publish_threads_chain_with_progress(parts, image_url=image_url, progress_callback=report_progress)
-        await update_publication_progress(progress_message, preview, total_parts, uploaded_count, status="Done")
+            post_ids = await publish_threads_chain_with_progress(parts, image_url=image_url, progress_callback=report_progress)
+            await update_publication_progress(progress_message, preview, total_parts, uploaded_count, status="Done")
+
+        if bluesky_active:
+            bluesky_parts = split_text_for_bluesky(text, source_url=telegram_post_url(message))
+            logger.info("Telegram message %s split into %s Bluesky part(s): %s", message.message_id, len(bluesky_parts), [len(part) for part in bluesky_parts])
+            bluesky_post_uris = publish_bluesky_chain(bluesky_parts, image_url=image_url)
     except Exception:
         logger.exception("Failed to crosspost Telegram message %s", message.message_id)
         if progress_message:
@@ -859,7 +1020,10 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     state["posted_count"] = int(state.get("posted_count", 0)) + 1
     remember_message(message.message_id, save=False)
     save_state()
-    logger.info("Crossposted Telegram message %s to Threads posts: %s", message.message_id, ", ".join(post_ids))
+    if threads_enabled():
+        logger.info("Crossposted Telegram message %s to Threads posts: %s", message.message_id, ", ".join(post_ids))
+    if bluesky_active:
+        logger.info("Crossposted Telegram message %s to Bluesky posts: %s", message.message_id, ", ".join(bluesky_post_uris))
 
 
 def remember_message(message_id: int, save: bool = True) -> None:
@@ -998,8 +1162,12 @@ def schedule_next_weekly_castaneda() -> None:
 
 
 async def post_weekly_castaneda() -> None:
-    if not threads_enabled():
-        logger.info("Skipping weekly Castaneda post: Threads posting is disabled")
+    bluesky_active = bluesky_enabled() and bluesky_configured()
+    if bluesky_enabled() and not bluesky_configured():
+        logger.warning("Skipping weekly Castaneda Bluesky post: missing handle/app password")
+
+    if not threads_enabled() and not bluesky_active:
+        logger.info("Skipping weekly Castaneda post: Threads and Bluesky posting are disabled")
         return
     if not weekly_castaneda_enabled():
         return
@@ -1013,16 +1181,31 @@ async def post_weekly_castaneda() -> None:
         return
 
     try:
-        parts = split_text_for_threads(text) if text else ["Weekly Castaneda"]
-        parts = append_castaneda_telegram_link(parts)
-        post_ids = publish_threads_chain(parts, image_url=image_url)
+        post_ids: list[str] = []
+        bluesky_post_uris: list[str] = []
+        if threads_enabled():
+            parts = split_text_for_threads(text) if text else ["Weekly Castaneda"]
+            parts = append_castaneda_telegram_link(parts)
+            post_ids = publish_threads_chain(parts, image_url=image_url)
+        if bluesky_active:
+            bluesky_parts = split_text_for_bluesky(text) if text else ["Weekly Castaneda"]
+            bluesky_parts = append_suffix_to_thread_parts(
+                bluesky_parts,
+                f"\n\nMore daily quotes in Telegram:\n{CASTANEDA_TELEGRAM_LINK}",
+                limit=BLUESKY_MAX_CHARS,
+                max_parts=BLUESKY_MAX_PARTS,
+            )
+            bluesky_post_uris = publish_bluesky_chain(bluesky_parts, image_url=image_url)
     except Exception:
         logger.exception("Failed to publish weekly Castaneda post")
         schedule_next_weekly_castaneda()
         return
 
     schedule_next_weekly_castaneda()
-    logger.info("Published weekly Castaneda post to Threads posts: %s", ", ".join(post_ids))
+    if threads_enabled():
+        logger.info("Published weekly Castaneda post to Threads posts: %s", ", ".join(post_ids))
+    if bluesky_active:
+        logger.info("Published weekly Castaneda post to Bluesky posts: %s", ", ".join(bluesky_post_uris))
 
 
 async def check_weekly_castaneda_due() -> None:
@@ -1071,6 +1254,7 @@ def main() -> None:
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(setup_bot_commands).build()
     app.add_handler(CommandHandler("threads", threads_toggle_command))
+    app.add_handler(CommandHandler("bluesky", bluesky_toggle_command))
     app.add_handler(CommandHandler("weekly_castaneda", weekly_castaneda_command))
     app.add_handler(CommandHandler("threads_parts", threads_parts_command))
     app.add_handler(CommandHandler("threads_status", threads_status_command))
