@@ -13,7 +13,7 @@ It is designed for original text and image posts. Audio, video, documents, voice
 - Splits long Telegram posts into a Threads chain.
 - Skips audio, video, documents, voice messages, and unsupported media.
 - Optionally requires a marker tag, for example `#threads`, before crossposting.
-- Has a placeholder for one weekly random Castaneda post from local quote/media files.
+- Can post the latest remembered Castaneda channel quote to Threads once a week at a random daytime US time.
 
 ## Setup
 
@@ -46,7 +46,21 @@ python3 -m venv .venv
 - `CROSSPOST_IMAGES=true`: download Telegram photos, upload them to R2, and publish them to Threads.
 - `MAX_THREAD_PARTS=5`: prevents huge Telegram posts from becoming giant Threads chains.
 - `ADD_TELEGRAM_LINK_EVERY_N_POSTS=0`: set to a number like `7` to add the Telegram link occasionally.
+- `CROSSPOST_CASTANEDA_IMMEDIATELY=false`: remember Castaneda channel posts for weekly publishing instead of crossposting every Castaneda post immediately.
 
+## Weekly Castaneda
+
+When `CASTANEDA_CHANNEL_ID` is one of the source channels, the bot remembers the latest Castaneda channel post it sees, including its R2 image URL when image crossposting is enabled. If weekly Castaneda is enabled, the bot posts that latest remembered quote to Threads every Thursday at a random time between `WEEKLY_CASTANEDA_START_TIME` and `WEEKLY_CASTANEDA_END_TIME` in `TIMEZONE`.
+
+```env
+CASTANEDA_CHANNEL_ID=-1004445804313
+WEEKLY_CASTANEDA_ENABLED=true
+WEEKLY_CASTANEDA_DAY=thursday
+WEEKLY_CASTANEDA_START_TIME=07:07
+WEEKLY_CASTANEDA_END_TIME=21:19
+TIMEZONE=America/New_York
+CROSSPOST_CASTANEDA_IMMEDIATELY=false
+```
 
 
 ## Telegram Admin Commands
@@ -54,6 +68,7 @@ python3 -m venv .venv
 The command menu is scoped to `ADMIN_USER_ID`; global bot commands are cleared on startup.
 
 - `/threads`: toggle Threads posting on/off.
+- `/weekly_castaneda`: toggle weekly Castaneda posting on/off.
 - `/threads_parts`: ask for and save the max number of parts per Threads chain. You can also send `/threads_parts 8`.
 - `/threads_status`: show current state, including max thread parts.
 

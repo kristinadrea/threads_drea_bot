@@ -7,7 +7,8 @@ import os
 import random
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, time as datetime_time
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Awaitable, Callable, Iterable, Optional
 
@@ -43,6 +44,7 @@ STATE_BACKUP_FILE = DATA_DIR / "state.backup.json"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 SOURCE_CHANNEL_IDS_RAW = os.getenv("SOURCE_CHANNEL_IDS", os.getenv("SOURCE_CHANNEL_ID", "")).strip()
 SOURCE_CHANNEL_IDS = [item.strip() for item in SOURCE_CHANNEL_IDS_RAW.split(",") if item.strip()]
+CASTANEDA_CHANNEL_ID = os.getenv("CASTANEDA_CHANNEL_ID", "-1004445804313").strip()
 ADMIN_USER_ID = os.getenv("ADMIN_USER_ID", "").strip()
 THREADS_USER_ID = os.getenv("THREADS_USER_ID", "").strip()
 THREADS_ACCESS_TOKEN = os.getenv("THREADS_ACCESS_TOKEN", "").strip()
@@ -54,6 +56,7 @@ THREADS_REPLY_DELAY_SECONDS = float(os.getenv("THREADS_REPLY_DELAY_SECONDS", "4"
 THREADS_PUBLISH_RETRY_ATTEMPTS = int(os.getenv("THREADS_PUBLISH_RETRY_ATTEMPTS", "5"))
 THREADS_PUBLISH_RETRY_DELAY_SECONDS = float(os.getenv("THREADS_PUBLISH_RETRY_DELAY_SECONDS", "5"))
 CROSSPOST_IMAGES = os.getenv("CROSSPOST_IMAGES", "false").lower() == "true"
+CROSSPOST_CASTANEDA_IMMEDIATELY = os.getenv("CROSSPOST_CASTANEDA_IMMEDIATELY", "false").lower() == "true"
 REQUIRE_THREADS_TAG = os.getenv("REQUIRE_THREADS_TAG", "false").lower() == "true"
 THREADS_TAG = os.getenv("THREADS_TAG", "#threads")
 TELEGRAM_LINK = os.getenv("TELEGRAM_LINK", "").strip()
@@ -61,8 +64,9 @@ ADD_TELEGRAM_LINK_EVERY_N_POSTS = int(os.getenv("ADD_TELEGRAM_LINK_EVERY_N_POSTS
 THREADS_ENABLED_DEFAULT = os.getenv("THREADS_ENABLED", "true").lower() == "true"
 
 WEEKLY_CASTANEDA_ENABLED = os.getenv("WEEKLY_CASTANEDA_ENABLED", "false").lower() == "true"
-WEEKLY_CASTANEDA_DAY = os.getenv("WEEKLY_CASTANEDA_DAY", "sunday").lower()
-WEEKLY_CASTANEDA_TIME = os.getenv("WEEKLY_CASTANEDA_TIME", "09:00")
+WEEKLY_CASTANEDA_DAY = os.getenv("WEEKLY_CASTANEDA_DAY", "thursday").lower()
+WEEKLY_CASTANEDA_START_TIME = os.getenv("WEEKLY_CASTANEDA_START_TIME", "07:07")
+WEEKLY_CASTANEDA_END_TIME = os.getenv("WEEKLY_CASTANEDA_END_TIME", "21:19")
 TIMEZONE = os.getenv("TIMEZONE", "America/New_York")
 CASTANEDA_QUOTES_FILE = Path(os.getenv("CASTANEDA_QUOTES_FILE", str(BASE_DIR / "castaneda_quotes.txt")))
 CASTANEDA_MEDIA_URLS_FILE = Path(os.getenv("CASTANEDA_MEDIA_URLS_FILE", str(BASE_DIR / "castaneda_media_urls.txt")))
@@ -133,6 +137,9 @@ state = load_json(
         "posted_count": 0,
         "telegram_message_ids": [],
         "weekly_castaneda_used_indexes": [],
+        "weekly_castaneda_enabled": WEEKLY_CASTANEDA_ENABLED,
+        "weekly_castaneda_next_run": None,
+        "latest_castaneda_post": None,
         "threads_enabled": THREADS_ENABLED_DEFAULT,
         "max_thread_parts": MAX_THREAD_PARTS,
         "awaiting_threads_parts_user_id": None,
@@ -141,6 +148,9 @@ state = load_json(
 state.setdefault("posted_count", 0)
 state.setdefault("telegram_message_ids", [])
 state.setdefault("weekly_castaneda_used_indexes", [])
+state.setdefault("weekly_castaneda_enabled", WEEKLY_CASTANEDA_ENABLED)
+state.setdefault("weekly_castaneda_next_run", None)
+state.setdefault("latest_castaneda_post", None)
 state.setdefault("threads_enabled", THREADS_ENABLED_DEFAULT)
 state.setdefault("max_thread_parts", MAX_THREAD_PARTS)
 state.setdefault("awaiting_threads_parts_user_id", None)
@@ -179,9 +189,24 @@ def set_max_thread_parts(value: int) -> None:
     save_state()
 
 
+def weekly_castaneda_enabled() -> bool:
+    return bool(state.get("weekly_castaneda_enabled", WEEKLY_CASTANEDA_ENABLED))
+
+
+def set_weekly_castaneda_enabled(enabled: bool) -> None:
+    state["weekly_castaneda_enabled"] = enabled
+    if enabled:
+        ensure_weekly_castaneda_next_run(force=True)
+    else:
+        state["weekly_castaneda_next_run"] = None
+    save_state()
+
+
 def threads_status_text() -> str:
     status = "ON" if threads_enabled() else "OFF"
-    return f"Threads posting: {status}\nMax thread parts: {get_max_thread_parts()}"
+    weekly_status = "ON" if weekly_castaneda_enabled() else "OFF"
+    next_run = format_weekly_castaneda_next_run()
+    return f"Threads posting: {status}\nMax thread parts: {get_max_thread_parts()}\nWeekly Castaneda: {weekly_status}\nNext Castaneda: {next_run}"
 
 
 async def reject_non_admin(update: Update) -> bool:
@@ -196,6 +221,13 @@ async def threads_toggle_command(update: Update, context: ContextTypes.DEFAULT_T
     if await reject_non_admin(update):
         return
     set_threads_enabled(not threads_enabled())
+    await update.effective_message.reply_text(threads_status_text())
+
+
+async def weekly_castaneda_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_non_admin(update):
+        return
+    set_weekly_castaneda_enabled(not weekly_castaneda_enabled())
     await update.effective_message.reply_text(threads_status_text())
 
 
@@ -276,19 +308,31 @@ async def setup_bot_commands(app: Application) -> None:
 
     commands = [
         BotCommand("threads", "Threads on/off"),
+        BotCommand("weekly_castaneda", "Weekly Castaneda on/off"),
         BotCommand("threads_parts", "Set max thread parts"),
         BotCommand("threads_status", "Threads status"),
     ]
     await app.bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=int(ADMIN_USER_ID)))
 
 
-def message_matches_source(message: Message) -> bool:
+def chat_candidates(message: Message) -> set[str]:
     chat = message.chat
     candidates = {str(chat.id)}
     if chat.username:
         candidates.add(f"@{chat.username}")
         candidates.add(chat.username)
+    return candidates
+
+
+def message_matches_source(message: Message) -> bool:
+    candidates = chat_candidates(message)
     return any(source in candidates for source in SOURCE_CHANNEL_IDS)
+
+
+def message_matches_castaneda_channel(message: Message) -> bool:
+    if not CASTANEDA_CHANNEL_ID:
+        return False
+    return CASTANEDA_CHANNEL_ID in chat_candidates(message)
 
 
 def has_unsupported_media(message: Message) -> bool:
@@ -723,11 +767,6 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not message or not message_matches_source(message):
         return
 
-    if not threads_enabled():
-        logger.info("Skipping Telegram message %s: Threads posting is disabled", message.message_id)
-        remember_message(message.message_id)
-        return
-
     if message.message_id in state.get("telegram_message_ids", []):
         logger.info("Skipping already processed Telegram message %s", message.message_id)
         return
@@ -748,12 +787,31 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.info("Crossposting Telegram message %s caption without image: image crossposting is disabled", message.message_id)
 
     text = clean_threads_marker(raw_text)
+    image_url: Optional[str] = None
+    try:
+        image_url = await upload_telegram_photo_to_r2(message, context)
+    except Exception:
+        logger.exception("Failed to upload Telegram image for message %s", message.message_id)
+        return
+
+    is_castaneda_post = message_matches_castaneda_channel(message)
+    if is_castaneda_post:
+        remember_latest_castaneda_post(message, text, image_url)
+        if not CROSSPOST_CASTANEDA_IMMEDIATELY:
+            remember_message(message.message_id)
+            logger.info("Stored Castaneda message %s for weekly posting only", message.message_id)
+            return
+
+    if not threads_enabled():
+        logger.info("Skipping Telegram message %s: Threads posting is disabled", message.message_id)
+        remember_message(message.message_id)
+        return
+
     preview = publication_preview(text)
     progress_message: Optional[Message] = None
     uploaded_count = 0
     total_parts = 0
     try:
-        image_url = await upload_telegram_photo_to_r2(message, context)
         parts = maybe_add_telegram_link(split_text_for_threads(text, source_url=telegram_post_url(message)))
         total_parts = len(parts)
         logger.info("Telegram message %s split into %s Threads part(s): %s", message.message_id, total_parts, [len(part) for part in parts])
@@ -799,42 +857,154 @@ def load_lines(path: Path) -> list[str]:
     return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def choose_weekly_castaneda_post() -> Optional[tuple[str, Optional[str]]]:
-    quotes = load_quote_blocks(CASTANEDA_QUOTES_FILE)
-    if not quotes:
-        logger.warning("Weekly Castaneda is enabled, but no quotes were found")
+def parse_hhmm(value: str) -> tuple[int, int]:
+    hour_text, minute_text = value.split(":", 1)
+    hour = int(hour_text)
+    minute = int(minute_text)
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError(f"Invalid time: {value}")
+    return hour, minute
+
+
+def timezone_now() -> datetime:
+    return datetime.now(ZoneInfo(TIMEZONE))
+
+
+def weekly_day_index() -> int:
+    aliases = {
+        "mon": 0,
+        "monday": 0,
+        "tue": 1,
+        "tuesday": 1,
+        "wed": 2,
+        "wednesday": 2,
+        "thu": 3,
+        "thursday": 3,
+        "fri": 4,
+        "friday": 4,
+        "sat": 5,
+        "saturday": 5,
+        "sun": 6,
+        "sunday": 6,
+    }
+    return aliases.get(WEEKLY_CASTANEDA_DAY, 3)
+
+
+def next_random_weekly_castaneda_run(after: Optional[datetime] = None) -> datetime:
+    now = (after or timezone_now()).astimezone(ZoneInfo(TIMEZONE))
+    target_day = weekly_day_index()
+    days_ahead = (target_day - now.weekday()) % 7
+    start_hour, start_minute = parse_hhmm(WEEKLY_CASTANEDA_START_TIME)
+    end_hour, end_minute = parse_hhmm(WEEKLY_CASTANEDA_END_TIME)
+    start_total = start_hour * 60 + start_minute
+    end_total = end_hour * 60 + end_minute
+    if end_total < start_total:
+        raise ValueError("WEEKLY_CASTANEDA_END_TIME must be later than WEEKLY_CASTANEDA_START_TIME")
+
+    if days_ahead == 0:
+        today_latest = datetime.combine(now.date(), datetime_time(end_hour, end_minute), tzinfo=now.tzinfo)
+        if now >= today_latest:
+            days_ahead = 7
+
+    run_date = (now + timedelta(days=days_ahead)).date()
+    random_minute = random.randint(start_total, end_total)
+    run_at = datetime.combine(
+        run_date,
+        datetime_time(random_minute // 60, random_minute % 60),
+        tzinfo=now.tzinfo,
+    )
+    if run_at <= now:
+        run_at = next_random_weekly_castaneda_run(after=now + timedelta(days=1))
+    return run_at
+
+
+def parse_state_datetime(value: object) -> Optional[datetime]:
+    if not isinstance(value, str) or not value:
         return None
-
-    used = set(state.get("weekly_castaneda_used_indexes", []))
-    if len(used) >= len(quotes):
-        used = set()
-        state["weekly_castaneda_used_indexes"] = []
-
-    available = [index for index in range(len(quotes)) if index not in used]
-    index = random.choice(available)
-    state.setdefault("weekly_castaneda_used_indexes", []).append(index)
-
-    media_urls = load_lines(CASTANEDA_MEDIA_URLS_FILE)
-    image_url = random.choice(media_urls) if media_urls else None
-    return quotes[index], image_url
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo(TIMEZONE))
+    return parsed.astimezone(ZoneInfo(TIMEZONE))
 
 
-def post_weekly_castaneda() -> None:
+def ensure_weekly_castaneda_next_run(force: bool = False) -> Optional[datetime]:
+    if not weekly_castaneda_enabled():
+        return None
+    now = timezone_now()
+    run_at = parse_state_datetime(state.get("weekly_castaneda_next_run"))
+    if force or run_at is None or run_at <= now:
+        run_at = next_random_weekly_castaneda_run(after=now)
+        state["weekly_castaneda_next_run"] = run_at.isoformat()
+        save_state()
+    return run_at
+
+
+def format_weekly_castaneda_next_run() -> str:
+    if not weekly_castaneda_enabled():
+        return "OFF"
+    run_at = ensure_weekly_castaneda_next_run()
+    if not run_at:
+        return "not scheduled"
+    return run_at.strftime("%a %Y-%m-%d %H:%M %Z")
+
+
+def remember_latest_castaneda_post(message: Message, text: str, image_url: Optional[str]) -> None:
+    state["latest_castaneda_post"] = {
+        "text": text,
+        "image_url": image_url,
+        "telegram_url": telegram_post_url(message),
+        "message_id": message.message_id,
+        "chat_id": message.chat_id,
+        "stored_at": datetime.now(timezone.utc).isoformat(),
+    }
+    save_state()
+    logger.info("Remembered latest Castaneda post from Telegram message %s", message.message_id)
+
+
+def schedule_next_weekly_castaneda() -> None:
+    run_at = next_random_weekly_castaneda_run(after=timezone_now() + timedelta(days=1))
+    state["weekly_castaneda_next_run"] = run_at.isoformat()
+    save_state()
+    logger.info("Next weekly Castaneda post scheduled for %s", run_at.isoformat())
+
+
+async def post_weekly_castaneda() -> None:
     if not threads_enabled():
         logger.info("Skipping weekly Castaneda post: Threads posting is disabled")
         return
-    selected = choose_weekly_castaneda_post()
-    if not selected:
+    if not weekly_castaneda_enabled():
         return
-    text, image_url = selected
+
+    latest = state.get("latest_castaneda_post") or {}
+    text = strip_html_tags(str(latest.get("text") or "").strip())
+    image_url = latest.get("image_url") or None
+    source_url = latest.get("telegram_url") or None
+    if not text and not image_url:
+        logger.warning("Weekly Castaneda is enabled, but no latest Castaneda channel post is remembered yet")
+        schedule_next_weekly_castaneda()
+        return
+
     try:
-        parts = split_text_for_threads(strip_html_tags(text))
+        parts = split_text_for_threads(text, source_url=source_url) if text else ["Weekly Castaneda"]
         post_ids = publish_threads_chain(parts, image_url=image_url)
     except Exception:
         logger.exception("Failed to publish weekly Castaneda post")
+        schedule_next_weekly_castaneda()
         return
-    save_state()
+
+    schedule_next_weekly_castaneda()
     logger.info("Published weekly Castaneda post to Threads posts: %s", ", ".join(post_ids))
+
+
+async def check_weekly_castaneda_due() -> None:
+    if not weekly_castaneda_enabled():
+        return
+    run_at = ensure_weekly_castaneda_next_run()
+    if run_at and timezone_now() >= run_at:
+        await post_weekly_castaneda()
 
 
 def strip_html_tags(text: str) -> str:
@@ -852,18 +1022,18 @@ def configure_scheduler() -> AsyncIOScheduler:
             replace_existing=True,
         )
         logger.info("R2 media cleanup enabled: deleting %s older than %s day(s)", R2_PREFIX or R2_BUCKET, R2_MEDIA_RETENTION_DAYS)
-    if WEEKLY_CASTANEDA_ENABLED:
-        hour_text, minute_text = WEEKLY_CASTANEDA_TIME.split(":", 1)
-        scheduler.add_job(
-            post_weekly_castaneda,
-            "cron",
-            day_of_week=DAY_ALIASES.get(WEEKLY_CASTANEDA_DAY, WEEKLY_CASTANEDA_DAY[:3]),
-            hour=int(hour_text),
-            minute=int(minute_text),
-            id="weekly_castaneda_post",
-            replace_existing=True,
-        )
-        logger.info("Weekly Castaneda post scheduled: %s at %s %s", WEEKLY_CASTANEDA_DAY, WEEKLY_CASTANEDA_TIME, TIMEZONE)
+    scheduler.add_job(
+        check_weekly_castaneda_due,
+        "interval",
+        minutes=1,
+        id="weekly_castaneda_check",
+        replace_existing=True,
+    )
+    if weekly_castaneda_enabled():
+        run_at = ensure_weekly_castaneda_next_run()
+        logger.info("Weekly Castaneda enabled: next run %s", run_at.isoformat() if run_at else "not scheduled")
+    else:
+        logger.info("Weekly Castaneda disabled")
     scheduler.start()
     return scheduler
 
@@ -875,6 +1045,7 @@ def main() -> None:
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(setup_bot_commands).build()
     app.add_handler(CommandHandler("threads", threads_toggle_command))
+    app.add_handler(CommandHandler("weekly_castaneda", weekly_castaneda_command))
     app.add_handler(CommandHandler("threads_parts", threads_parts_command))
     app.add_handler(CommandHandler("threads_status", threads_status_command))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, admin_text_message))
