@@ -322,11 +322,7 @@ def split_text_for_threads(
     if truncated:
         last_limit = max(1, limit - len(suffix))
         visible_limit = max(1, (part_count - 1) * limit + last_limit)
-        visible_text = text[:visible_limit].rstrip()
-        boundary = max(visible_text.rfind(" "), visible_text.rfind("\n"))
-        if boundary > int(visible_limit * 0.8):
-            visible_text = visible_text[:boundary].rstrip()
-        text = visible_text
+        text = trim_to_readable_boundary(text[:visible_limit].rstrip())
         part_limits = [limit] * max(0, part_count - 1) + [last_limit]
     else:
         part_limits = [limit] * part_count
@@ -354,17 +350,19 @@ def split_text_evenly(text: str, part_limits: list[int]) -> list[str]:
         while token_index < len(tokens):
             token = tokens[token_index]
             candidate = current + token if current else token.lstrip()
-            if len(candidate) <= target or not current:
-                if len(candidate) <= part_limit:
-                    current = candidate
-                    token_index += 1
-                    continue
+            current_is_tiny = bool(current) and len(current) < max(80, int(target * 0.85))
+            can_fit_part = len(candidate) <= part_limit
+            should_take = len(candidate) <= target or current_is_tiny or not current
+
+            if should_take and can_fit_part:
+                current = candidate
+                token_index += 1
+                continue
 
             if current:
                 break
 
-            current = candidate[:part_limit]
-            leftover = candidate[part_limit:].lstrip()
+            current, leftover = split_oversized_token(candidate, part_limit)
             tokens[token_index] = leftover
             if not leftover:
                 token_index += 1
@@ -379,23 +377,57 @@ def split_text_evenly(text: str, part_limits: list[int]) -> list[str]:
             if parts and len(parts[-1]) + 2 + len(tail) <= part_limits[min(len(parts) - 1, len(part_limits) - 1)]:
                 parts[-1] = f"{parts[-1]}\n\n{tail}"
             elif len(parts) < len(part_limits):
-                parts.append(tail[: part_limits[len(parts)]].strip())
+                extra, _ = split_oversized_token(tail, part_limits[len(parts)])
+                parts.append(extra.strip())
 
     return parts or [text[: part_limits[0]].strip()]
+
+
+def split_oversized_token(text: str, limit: int) -> tuple[str, str]:
+    piece = text[:limit].rstrip()
+    boundary = max(piece.rfind(" "), piece.rfind("\n"))
+    if boundary > int(limit * 0.65):
+        piece = piece[:boundary].rstrip()
+    return piece, text[len(piece):].lstrip()
+
+
+def trim_to_readable_boundary(text: str) -> str:
+    if not text:
+        return text
+
+    sentence_ends = [match.end() for match in re.finditer(r"[.!?][\"')\]]*(?=\s|$)", text)]
+    min_pos = int(len(text) * 0.72)
+    usable_sentence_ends = [position for position in sentence_ends if position >= min_pos]
+    if usable_sentence_ends:
+        return text[: usable_sentence_ends[-1]].rstrip()
+
+    boundary = max(text.rfind(" "), text.rfind("\n"))
+    if boundary > min_pos:
+        return text[:boundary].rstrip()
+    return text.rstrip()
+
+
+def split_sentences(paragraph: str) -> list[str]:
+    sentences = [
+        match.group(0).strip()
+        for match in re.finditer(r"[^.!?]+(?:[.!?][\"')\]]*)?", paragraph)
+        if match.group(0).strip()
+    ]
+    return sentences or [paragraph.strip()]
 
 
 def text_to_tokens(text: str) -> list[str]:
     tokens: list[str] = []
     paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
     for paragraph_index, paragraph in enumerate(paragraphs):
-        words = paragraph.split()
-        for word_index, word in enumerate(words):
-            if tokens and word_index == 0 and paragraph_index > 0:
-                tokens.append("\n\n" + word)
+        sentences = split_sentences(paragraph)
+        for sentence_index, sentence in enumerate(sentences):
+            if tokens and sentence_index == 0 and paragraph_index > 0:
+                tokens.append("\n\n" + sentence)
             elif tokens:
-                tokens.append(" " + word)
+                tokens.append(" " + sentence)
             else:
-                tokens.append(word)
+                tokens.append(sentence)
     return tokens
 
 
