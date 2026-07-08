@@ -45,6 +45,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 SOURCE_CHANNEL_IDS_RAW = os.getenv("SOURCE_CHANNEL_IDS", os.getenv("SOURCE_CHANNEL_ID", "")).strip()
 SOURCE_CHANNEL_IDS = [item.strip() for item in SOURCE_CHANNEL_IDS_RAW.split(",") if item.strip()]
 CASTANEDA_CHANNEL_ID = os.getenv("CASTANEDA_CHANNEL_ID", "-1004445804313").strip()
+CASTANEDA_TELEGRAM_LINK = os.getenv("CASTANEDA_TELEGRAM_LINK", "https://t.me/carlos_castaneda_quotes").strip()
 ADMIN_USER_ID = os.getenv("ADMIN_USER_ID", "").strip()
 THREADS_USER_ID = os.getenv("THREADS_USER_ID", "").strip()
 THREADS_ACCESS_TOKEN = os.getenv("THREADS_ACCESS_TOKEN", "").strip()
@@ -366,6 +367,31 @@ def should_crosspost_text(text: str) -> bool:
     if REQUIRE_THREADS_TAG and THREADS_TAG.lower() not in text.lower():
         return False
     return True
+
+
+def append_suffix_to_thread_parts(parts: list[str], suffix: str, limit: int = MAX_THREAD_CHARS) -> list[str]:
+    if not suffix:
+        return parts
+    parts = list(parts) or [""]
+    if len(parts[-1]) + len(suffix) <= limit:
+        parts[-1] = parts[-1].rstrip() + suffix
+        return parts
+
+    max_parts = get_max_thread_parts()
+    if len(parts) < max_parts and len(suffix.strip()) <= limit:
+        parts.append(suffix.strip())
+        return parts
+
+    available = max(1, limit - len(suffix))
+    parts[-1] = trim_to_readable_boundary(parts[-1][:available].rstrip()).rstrip() + suffix
+    return parts
+
+
+def append_castaneda_telegram_link(parts: list[str]) -> list[str]:
+    if not CASTANEDA_TELEGRAM_LINK:
+        return parts
+    suffix = f"\n\nMore daily quotes in Telegram:\n{CASTANEDA_TELEGRAM_LINK}"
+    return append_suffix_to_thread_parts(parts, suffix)
 
 
 def split_text_for_threads(
@@ -981,14 +1007,14 @@ async def post_weekly_castaneda() -> None:
     latest = state.get("latest_castaneda_post") or {}
     text = strip_html_tags(str(latest.get("text") or "").strip())
     image_url = latest.get("image_url") or None
-    source_url = latest.get("telegram_url") or None
     if not text and not image_url:
         logger.warning("Weekly Castaneda is enabled, but no latest Castaneda channel post is remembered yet")
         schedule_next_weekly_castaneda()
         return
 
     try:
-        parts = split_text_for_threads(text, source_url=source_url) if text else ["Weekly Castaneda"]
+        parts = split_text_for_threads(text) if text else ["Weekly Castaneda"]
+        parts = append_castaneda_telegram_link(parts)
         post_ids = publish_threads_chain(parts, image_url=image_url)
     except Exception:
         logger.exception("Failed to publish weekly Castaneda post")

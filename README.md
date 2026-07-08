@@ -50,10 +50,11 @@ python3 -m venv .venv
 
 ## Weekly Castaneda
 
-When `CASTANEDA_CHANNEL_ID` is one of the source channels, the bot remembers the latest Castaneda channel post it sees, including its R2 image URL when image crossposting is enabled. If weekly Castaneda is enabled, the bot posts that latest remembered quote to Threads every Thursday at a random time between `WEEKLY_CASTANEDA_START_TIME` and `WEEKLY_CASTANEDA_END_TIME` in `TIMEZONE`.
+When `CASTANEDA_CHANNEL_ID` is one of the source channels, the bot remembers the latest Castaneda channel post it sees, including its R2 image URL when image crossposting is enabled. If weekly Castaneda is enabled, the bot posts that latest remembered quote to Threads every Thursday at a random time between `WEEKLY_CASTANEDA_START_TIME` and `WEEKLY_CASTANEDA_END_TIME` in `TIMEZONE`. The final Threads part includes `More daily quotes in Telegram:` plus `CASTANEDA_TELEGRAM_LINK`.
 
 ```env
 CASTANEDA_CHANNEL_ID=-1004445804313
+CASTANEDA_TELEGRAM_LINK=https://t.me/carlos_castaneda_quotes
 WEEKLY_CASTANEDA_ENABLED=true
 WEEKLY_CASTANEDA_DAY=thursday
 WEEKLY_CASTANEDA_START_TIME=07:07
