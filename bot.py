@@ -14,7 +14,16 @@ import boto3
 import requests
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
-from telegram import BotCommand, BotCommandScopeChat, Message, Update
+from telegram import (
+    BotCommand,
+    BotCommandScopeAllChatAdministrators,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
+    Message,
+    Update,
+)
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 load_dotenv()
@@ -249,10 +258,19 @@ async def admin_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def setup_bot_commands(app: Application) -> None:
-    await app.bot.delete_my_commands()
+    public_scopes = [
+        BotCommandScopeDefault(),
+        BotCommandScopeAllPrivateChats(),
+        BotCommandScopeAllGroupChats(),
+        BotCommandScopeAllChatAdministrators(),
+    ]
+    for scope in public_scopes:
+        await app.bot.delete_my_commands(scope=scope)
+
     if not ADMIN_USER_ID:
         logger.warning("ADMIN_USER_ID is not set; Telegram command menu will not be scoped to admin")
         return
+
     commands = [
         BotCommand("threads", "Threads on/off"),
         BotCommand("threads_parts", "Set max thread parts"),
