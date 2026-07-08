@@ -60,6 +60,28 @@ BLUESKY_MAX_PARTS = int(os.getenv("BLUESKY_MAX_PARTS", "8"))
 BLUESKY_IMAGE_ALT = os.getenv("BLUESKY_IMAGE_ALT", "").strip()
 BLUESKY_MAX_IMAGE_BYTES = int(os.getenv("BLUESKY_MAX_IMAGE_BYTES", str(2 * 1024 * 1024)))
 BLUESKY_TAGS = [tag.strip() for tag in os.getenv("BLUESKY_TAGS", "").split(",") if tag.strip()]
+BLUESKY_MIN_TAGS = int(os.getenv("BLUESKY_MIN_TAGS", "2"))
+BLUESKY_MAX_TAGS_PER_POST = int(os.getenv("BLUESKY_MAX_TAGS_PER_POST", "4"))
+
+SEMANTIC_TAG_RULES = [
+    ("Castaneda", ["castaneda", "don juan", "nagual", "tonal", "sorcerer", "warrior", "stalking", "dreaming", "intent", "assemblage point", "second attention", "impeccability"]),
+    ("WarriorPath", ["warrior", "path", "impeccable", "discipline", "courage", "fear", "controlled folly"]),
+    ("Awareness", ["awareness", "attention", "consciousness", "perception", "witness", "presence"]),
+    ("Intent", ["intent", "will", "power", "direction", "summon"]),
+    ("Dreaming", ["dream", "dreaming", "lucid", "night", "sleep"]),
+    ("Stalking", ["stalk", "stalking", "strategy", "behavior", "self-importance", "personal importance"]),
+    ("Silence", ["silence", "inner silence", "quiet", "stillness", "meditation"]),
+    ("Energy", ["energy", "luminous", "light", "force", "vibration", "body"]),
+    ("Freedom", ["freedom", "liberation", "free", "limit", "choice"]),
+    ("Death", ["death", "mortality", "finite", "last moment"]),
+    ("Philosophy", ["meaning", "truth", "wisdom", "knowledge", "reality", "existence"]),
+    ("Spirituality", ["spirit", "soul", "sacred", "divine", "god", "mystic", "transcend"]),
+    ("Creativity", ["create", "creator", "art", "imagination", "vision"]),
+    ("Universe", ["universe", "cosmos", "infinity", "infinite", "stars"]),
+    ("Psychology", ["mind", "emotion", "ego", "self", "identity", "memory"]),
+    ("Love", ["love", "heart", "compassion", "tender"]),
+]
+DEFAULT_BLUESKY_TAGS = ["Spirituality", "Philosophy", "Awareness", "Quotes"]
 
 MAX_THREAD_CHARS = int(os.getenv("MAX_THREAD_CHARS", "480"))
 MAX_THREAD_PARTS = int(os.getenv("MAX_THREAD_PARTS", "5"))
@@ -726,10 +748,55 @@ async def publish_threads_chain_with_progress(
 
 
 
-def append_bluesky_tags(parts: list[str]) -> list[str]:
-    if not BLUESKY_TAGS:
+def normalize_bluesky_tag(tag: str) -> Optional[str]:
+    cleaned = re.sub(r"[^A-Za-z0-9_]", "", tag.strip().lstrip("#"))
+    if not cleaned:
+        return None
+    return f"#{cleaned[:64]}"
+
+
+def count_tag_keyword(text: str, keyword: str) -> int:
+    if " " in keyword:
+        return len(re.findall(re.escape(keyword), text))
+    return len(re.findall(rf"\b{re.escape(keyword)}\b", text))
+
+
+def infer_bluesky_tags(text: str) -> list[str]:
+    normalized_text = text.lower()
+    max_tags = max(1, BLUESKY_MAX_TAGS_PER_POST)
+    min_tags = min(max(0, BLUESKY_MIN_TAGS), max_tags)
+    scored_tags: list[tuple[int, int, str]] = []
+
+    for order, (tag, keywords) in enumerate(SEMANTIC_TAG_RULES):
+        score = sum(count_tag_keyword(normalized_text, keyword) for keyword in keywords)
+        if score:
+            scored_tags.append((-score, order, tag))
+
+    selected: list[str] = []
+    for _, _, tag in sorted(scored_tags):
+        normalized_tag = normalize_bluesky_tag(tag)
+        if normalized_tag and normalized_tag not in selected:
+            selected.append(normalized_tag)
+        if len(selected) >= max_tags:
+            return selected
+
+    fallback_tags = BLUESKY_TAGS or DEFAULT_BLUESKY_TAGS
+    for tag in fallback_tags:
+        normalized_tag = normalize_bluesky_tag(tag)
+        if normalized_tag and normalized_tag not in selected:
+            selected.append(normalized_tag)
+        if len(selected) >= max_tags:
+            break
+
+    if len(selected) < min_tags:
+        return selected
+    return selected[:max_tags]
+
+
+def append_bluesky_tags(parts: list[str], source_text: str) -> list[str]:
+    tags = " ".join(infer_bluesky_tags(source_text))
+    if not tags:
         return parts
-    tags = " ".join(tag if tag.startswith("#") else f"#{tag}" for tag in BLUESKY_TAGS)
     suffix = f"\n\n{tags}"
     return append_suffix_to_thread_parts(parts, suffix, limit=BLUESKY_MAX_CHARS, max_parts=BLUESKY_MAX_PARTS)
 
@@ -741,7 +808,7 @@ def split_text_for_bluesky(text: str, source_url: Optional[str] = None) -> list[
         max_parts=BLUESKY_MAX_PARTS,
         source_url=source_url,
     )
-    return append_bluesky_tags(parts)
+    return append_bluesky_tags(parts, text)
 
 
 def create_bluesky_session() -> dict:

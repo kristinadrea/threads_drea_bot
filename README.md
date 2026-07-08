@@ -62,10 +62,12 @@ BLUESKY_HANDLE=your-handle.bsky.social
 BLUESKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
 BLUESKY_MAX_CHARS=280
 BLUESKY_MAX_PARTS=8
-BLUESKY_TAGS=Castaneda,Spirituality,Quotes
+BLUESKY_MIN_TAGS=2
+BLUESKY_MAX_TAGS_PER_POST=4
+BLUESKY_TAGS=Spirituality,Philosophy,Awareness,Quotes
 ```
 
-Use an app password from Bluesky settings, not your main account password. `BLUESKY_TAGS` is optional; keep it to a few relevant tags. Images larger than `BLUESKY_MAX_IMAGE_BYTES` are skipped for Bluesky, while the text still publishes.
+Use an app password from Bluesky settings, not your main account password. The bot automatically adds 2-4 tags that match each post's text. `BLUESKY_TAGS` is optional fallback list for very short or unclear posts. Images larger than `BLUESKY_MAX_IMAGE_BYTES` are skipped for Bluesky, while the text still publishes.
 
 ## Weekly Castaneda
 
