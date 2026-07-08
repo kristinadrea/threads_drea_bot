@@ -1056,7 +1056,11 @@ def main() -> None:
     try:
         app.run_polling(allowed_updates=["channel_post", "message"])
     finally:
-        scheduler.shutdown(wait=False)
+        try:
+            scheduler.shutdown(wait=False)
+        except RuntimeError as exc:
+            if "Event loop is closed" not in str(exc):
+                raise
 
 
 if __name__ == "__main__":
