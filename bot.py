@@ -66,7 +66,7 @@ THREADS_ENABLED_DEFAULT = os.getenv("THREADS_ENABLED", "true").lower() == "true"
 WEEKLY_CASTANEDA_ENABLED = os.getenv("WEEKLY_CASTANEDA_ENABLED", "false").lower() == "true"
 WEEKLY_CASTANEDA_DAY = os.getenv("WEEKLY_CASTANEDA_DAY", "thursday").lower()
 WEEKLY_CASTANEDA_START_TIME = os.getenv("WEEKLY_CASTANEDA_START_TIME", "07:07")
-WEEKLY_CASTANEDA_END_TIME = os.getenv("WEEKLY_CASTANEDA_END_TIME", "21:19")
+WEEKLY_CASTANEDA_END_TIME = os.getenv("WEEKLY_CASTANEDA_END_TIME", "18:59")
 TIMEZONE = os.getenv("TIMEZONE", "America/New_York")
 CASTANEDA_QUOTES_FILE = Path(os.getenv("CASTANEDA_QUOTES_FILE", str(BASE_DIR / "castaneda_quotes.txt")))
 CASTANEDA_MEDIA_URLS_FILE = Path(os.getenv("CASTANEDA_MEDIA_URLS_FILE", str(BASE_DIR / "castaneda_media_urls.txt")))
