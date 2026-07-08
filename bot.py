@@ -1,3 +1,4 @@
+import asyncio
 import html
 import json
 import logging
@@ -8,7 +9,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Awaitable, Callable, Iterable, Optional
 
 import boto3
 import requests
@@ -588,6 +589,68 @@ def publish_threads_chain(parts: Iterable[str], image_url: Optional[str] = None)
     return post_ids
 
 
+async def publish_threads_chain_with_progress(
+    parts: Iterable[str],
+    image_url: Optional[str] = None,
+    progress_callback: Optional[Callable[[int, int, str], Awaitable[None]]] = None,
+) -> list[str]:
+    parts = list(parts)
+    post_ids: list[str] = []
+    previous_id: Optional[str] = None
+    total = len(parts)
+
+    for index, part in enumerate(parts):
+        if previous_id and THREADS_REPLY_DELAY_SECONDS > 0:
+            await asyncio.sleep(THREADS_REPLY_DELAY_SECONDS)
+        logger.info("Publishing Threads part %s/%s (%s chars)", index + 1, total, len(part))
+        post_id = publish_threads_post(part, image_url=image_url if index == 0 else None, reply_to_id=previous_id)
+        post_ids.append(post_id)
+        previous_id = post_id
+        if progress_callback:
+            await progress_callback(index + 1, total, post_id)
+
+    return post_ids
+
+
+def publication_preview(text: str) -> str:
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), "[image only]")
+    if len(first_line) > 140:
+        return first_line[:137].rstrip() + "..."
+    return first_line
+
+
+def publication_progress_text(preview: str, total: int, uploaded: int, status: str = "Publishing") -> str:
+    return f"{status} to Threads\n{preview}\nParts: {total}\n{uploaded}/{total} uploaded"
+
+
+async def send_publication_progress(context: ContextTypes.DEFAULT_TYPE, preview: str, total: int) -> Optional[Message]:
+    if not ADMIN_USER_ID:
+        return None
+    try:
+        return await context.bot.send_message(
+            chat_id=int(ADMIN_USER_ID),
+            text=publication_progress_text(preview, total, 0),
+        )
+    except Exception:
+        logger.exception("Failed to send publication progress message to admin")
+        return None
+
+
+async def update_publication_progress(
+    progress_message: Optional[Message],
+    preview: str,
+    total: int,
+    uploaded: int,
+    status: str = "Publishing",
+) -> None:
+    if not progress_message:
+        return
+    try:
+        await progress_message.edit_text(publication_progress_text(preview, total, uploaded, status=status))
+    except Exception:
+        logger.exception("Failed to update publication progress message")
+
+
 async def upload_telegram_photo_to_r2(message: Message, context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
     if not CROSSPOST_IMAGES or not message.photo:
         return None
@@ -685,13 +748,28 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.info("Crossposting Telegram message %s caption without image: image crossposting is disabled", message.message_id)
 
     text = clean_threads_marker(raw_text)
+    preview = publication_preview(text)
+    progress_message: Optional[Message] = None
+    uploaded_count = 0
+    total_parts = 0
     try:
         image_url = await upload_telegram_photo_to_r2(message, context)
         parts = maybe_add_telegram_link(split_text_for_threads(text, source_url=telegram_post_url(message)))
-        logger.info("Telegram message %s split into %s Threads part(s): %s", message.message_id, len(parts), [len(part) for part in parts])
-        post_ids = publish_threads_chain(parts, image_url=image_url)
+        total_parts = len(parts)
+        logger.info("Telegram message %s split into %s Threads part(s): %s", message.message_id, total_parts, [len(part) for part in parts])
+        progress_message = await send_publication_progress(context, preview, total_parts)
+
+        async def report_progress(uploaded: int, total: int, post_id: str) -> None:
+            nonlocal uploaded_count
+            uploaded_count = uploaded
+            await update_publication_progress(progress_message, preview, total, uploaded)
+
+        post_ids = await publish_threads_chain_with_progress(parts, image_url=image_url, progress_callback=report_progress)
+        await update_publication_progress(progress_message, preview, total_parts, uploaded_count, status="Done")
     except Exception:
         logger.exception("Failed to crosspost Telegram message %s", message.message_id)
+        if progress_message:
+            await update_publication_progress(progress_message, preview, total_parts, uploaded_count, status="Failed")
         return
 
     state["posted_count"] = int(state.get("posted_count", 0)) + 1
