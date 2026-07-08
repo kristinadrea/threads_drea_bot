@@ -50,6 +50,8 @@ THREADS_API_BASE = os.getenv("THREADS_API_BASE", "https://graph.threads.net/v1.0
 MAX_THREAD_CHARS = int(os.getenv("MAX_THREAD_CHARS", "480"))
 MAX_THREAD_PARTS = int(os.getenv("MAX_THREAD_PARTS", "5"))
 THREADS_REPLY_DELAY_SECONDS = float(os.getenv("THREADS_REPLY_DELAY_SECONDS", "4"))
+THREADS_PUBLISH_RETRY_ATTEMPTS = int(os.getenv("THREADS_PUBLISH_RETRY_ATTEMPTS", "5"))
+THREADS_PUBLISH_RETRY_DELAY_SECONDS = float(os.getenv("THREADS_PUBLISH_RETRY_DELAY_SECONDS", "5"))
 CROSSPOST_IMAGES = os.getenv("CROSSPOST_IMAGES", "false").lower() == "true"
 REQUIRE_THREADS_TAG = os.getenv("REQUIRE_THREADS_TAG", "false").lower() == "true"
 THREADS_TAG = os.getenv("THREADS_TAG", "#threads")
@@ -524,17 +526,46 @@ def create_threads_container(text: str, media_type: str = "TEXT", image_url: Opt
     return container_id
 
 
+def should_retry_threads_publish(response: requests.Response) -> bool:
+    if response.status_code >= 500:
+        return True
+    try:
+        error = response.json().get("error", {})
+    except ValueError:
+        return False
+    return error.get("code") == 24 or error.get("error_subcode") == 4279009
+
+
 def publish_threads_container(container_id: str) -> str:
-    response = requests.post(
-        f"{THREADS_API_BASE}/{THREADS_USER_ID}/threads_publish",
-        data={"creation_id": container_id, "access_token": THREADS_ACCESS_TOKEN},
-        timeout=30,
-    )
-    raise_for_threads_response(response, "publish")
-    post_id = response.json().get("id")
-    if not post_id:
-        raise RuntimeError(f"Threads publish response did not include id: {response.text}")
-    return post_id
+    last_response: Optional[requests.Response] = None
+    for attempt in range(1, THREADS_PUBLISH_RETRY_ATTEMPTS + 1):
+        response = requests.post(
+            f"{THREADS_API_BASE}/{THREADS_USER_ID}/threads_publish",
+            data={"creation_id": container_id, "access_token": THREADS_ACCESS_TOKEN},
+            timeout=30,
+        )
+        last_response = response
+        if response.ok:
+            post_id = response.json().get("id")
+            if not post_id:
+                raise RuntimeError(f"Threads publish response did not include id: {response.text}")
+            return post_id
+
+        if attempt < THREADS_PUBLISH_RETRY_ATTEMPTS and should_retry_threads_publish(response):
+            logger.warning(
+                "Threads publish attempt %s/%s failed with retryable response: %s",
+                attempt,
+                THREADS_PUBLISH_RETRY_ATTEMPTS,
+                response.text,
+            )
+            time.sleep(THREADS_PUBLISH_RETRY_DELAY_SECONDS)
+            continue
+
+        raise_for_threads_response(response, "publish")
+
+    if last_response is not None:
+        raise_for_threads_response(last_response, "publish")
+    raise RuntimeError("Threads publish failed without a response")
 
 
 def publish_threads_post(text: str, image_url: Optional[str] = None, reply_to_id: Optional[str] = None) -> str:
