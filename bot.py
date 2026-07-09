@@ -816,11 +816,18 @@ def infer_bluesky_tags(text: str) -> list[str]:
 
 
 def append_bluesky_tags(parts: list[str], source_text: str) -> list[str]:
-    tags = " ".join(infer_bluesky_tags(source_text))
+    tags = infer_bluesky_tags(source_text)
     if not tags:
         return parts
-    suffix = f"\n\n{tags}"
-    return append_suffix_to_thread_parts(parts, suffix, limit=BLUESKY_MAX_CHARS, max_parts=BLUESKY_MAX_PARTS)
+    parts = list(parts) or [""]
+
+    for tag_count in range(len(tags), 0, -1):
+        suffix = "\n\n" + " ".join(tags[:tag_count])
+        if len(parts[-1].rstrip()) + len(suffix) <= BLUESKY_MAX_CHARS:
+            parts[-1] = parts[-1].rstrip() + suffix
+            return parts
+
+    return parts
 
 
 def split_text_for_bluesky(text: str, source_url: Optional[str] = None) -> list[str]:
