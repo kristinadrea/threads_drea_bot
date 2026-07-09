@@ -463,6 +463,7 @@ def split_text_for_threads(
     limit: int = MAX_THREAD_CHARS,
     max_parts: Optional[int] = None,
     source_url: Optional[str] = None,
+    truncation_suffix: Optional[str] = None,
 ) -> list[str]:
     if max_parts is None:
         max_parts = get_max_thread_parts()
@@ -470,7 +471,10 @@ def split_text_for_threads(
     if len(text) <= limit:
         return [text]
 
-    suffix = f"\n\nMore in Telegram\n{source_url}" if source_url else "\n\nFull text in Telegram."
+    if truncation_suffix is None:
+        suffix = f"\n\nMore in Telegram:\n{source_url}" if source_url else "\n\nFull text in Telegram."
+    else:
+        suffix = truncation_suffix
     part_count = min(max_parts, max(1, (len(text) + limit - 1) // limit))
     truncated = len(text) > part_count * limit
 
@@ -486,6 +490,11 @@ def split_text_for_threads(
     if truncated:
         parts[-1] = parts[-1].rstrip() + suffix
     return parts
+
+
+def text_exceeds_social_capacity(text: str, limit: int, max_parts: int) -> bool:
+    normalized = re.sub(r"\n{3,}", "\n\n", text.strip())
+    return len(normalized) > max(1, limit) * max(1, max_parts)
 
 
 def split_text_evenly(text: str, part_limits: list[int]) -> list[str]:
@@ -802,13 +811,22 @@ def append_bluesky_tags(parts: list[str], source_text: str) -> list[str]:
 
 
 def split_text_for_bluesky(text: str, source_url: Optional[str] = None) -> list[str]:
+    truncated = bool(source_url) and text_exceeds_social_capacity(text, BLUESKY_MAX_CHARS, BLUESKY_MAX_PARTS)
     parts = split_text_for_threads(
         text,
         limit=BLUESKY_MAX_CHARS,
         max_parts=BLUESKY_MAX_PARTS,
-        source_url=source_url,
+        truncation_suffix="",
     )
-    return append_bluesky_tags(parts, text)
+    parts = append_bluesky_tags(parts, text)
+    if truncated and source_url:
+        parts = append_suffix_to_thread_parts(
+            parts,
+            f"\n\nMore in Telegram:\n{source_url}",
+            limit=BLUESKY_MAX_CHARS,
+            max_parts=BLUESKY_MAX_PARTS,
+        )
+    return parts
 
 
 def create_bluesky_session() -> dict:
