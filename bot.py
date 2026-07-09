@@ -34,6 +34,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logger = logging.getLogger("threads_drea_bot")
+ADMIN_BOT = None
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("DATA_DIR", str(BASE_DIR / "data")))
@@ -447,7 +448,7 @@ def append_suffix_to_thread_parts(
         return parts
 
     available = max(1, limit - len(suffix))
-    parts[-1] = trim_to_readable_boundary(parts[-1][:available].rstrip()).rstrip() + suffix
+    parts[-1] = trim_to_sentence_or_readable_boundary(parts[-1], available).rstrip() + suffix
     return parts
 
 
@@ -569,6 +570,18 @@ def trim_to_readable_boundary(text: str) -> str:
     if boundary > min_pos:
         return text[:boundary].rstrip()
     return text.rstrip()
+
+
+def trim_to_sentence_or_readable_boundary(text: str, limit: int) -> str:
+    piece = text[:limit].rstrip()
+    if not piece:
+        return piece
+
+    sentence_ends = [match.end() for match in re.finditer(r"[.!?][\"')\]]*(?=\s|$)", piece)]
+    if sentence_ends:
+        return piece[: sentence_ends[-1]].rstrip()
+
+    return trim_to_readable_boundary(piece)
 
 
 def split_sentences(paragraph: str) -> list[str]:
@@ -916,6 +929,37 @@ def publish_bluesky_chain(parts: Iterable[str], image_url: Optional[str] = None)
         post_uris.append(created["uri"])
     return post_uris
 
+
+async def publish_bluesky_chain_with_progress(
+    parts: Iterable[str],
+    image_url: Optional[str] = None,
+    progress_callback: Optional[Callable[[int, int, str], Awaitable[None]]] = None,
+) -> list[str]:
+    if not bluesky_enabled() or not bluesky_configured():
+        return []
+    parts = list(parts)
+    session = create_bluesky_session()
+    image_blob = upload_bluesky_image(session, image_url)
+    post_uris: list[str] = []
+    root_ref: Optional[dict] = None
+    parent_ref: Optional[dict] = None
+    total = len(parts)
+
+    for index, part in enumerate(parts):
+        logger.info("Publishing Bluesky part %s/%s (%s chars)", index + 1, total, len(part))
+        reply = {"root": root_ref, "parent": parent_ref} if root_ref and parent_ref else None
+        created = create_bluesky_record(session, part, image_blob=image_blob if index == 0 else None, reply=reply)
+        ref = {"uri": created["uri"], "cid": created["cid"]}
+        if root_ref is None:
+            root_ref = ref
+        parent_ref = ref
+        post_uris.append(created["uri"])
+        if progress_callback:
+            await progress_callback(index + 1, total, created["uri"])
+
+    return post_uris
+
+
 def publication_preview(text: str) -> str:
     first_line = next((line.strip() for line in text.splitlines() if line.strip()), "[image only]")
     if len(first_line) > 140:
@@ -923,17 +967,26 @@ def publication_preview(text: str) -> str:
     return first_line
 
 
-def publication_progress_text(preview: str, total: int, uploaded: int, status: str = "Publishing") -> str:
-    return f"{status} to Threads\n{preview}\nParts: {total}\n{uploaded}/{total} uploaded"
+def publication_progress_text(preview: str, total: int, uploaded: int, status: str = "Publishing", platform: str = "Threads") -> str:
+    return f"{status} to {platform}\n{preview}\nParts: {total}\n{uploaded}/{total} uploaded"
 
 
-async def send_publication_progress(context: ContextTypes.DEFAULT_TYPE, preview: str, total: int) -> Optional[Message]:
+async def send_publication_progress(
+    context: Optional[ContextTypes.DEFAULT_TYPE],
+    preview: str,
+    total: int,
+    platform: str = "Threads",
+    bot=None,
+) -> Optional[Message]:
     if not ADMIN_USER_ID:
         return None
+    telegram_bot = bot or (context.bot if context else None)
+    if not telegram_bot:
+        return None
     try:
-        return await context.bot.send_message(
+        return await telegram_bot.send_message(
             chat_id=int(ADMIN_USER_ID),
-            text=publication_progress_text(preview, total, 0),
+            text=publication_progress_text(preview, total, 0, platform=platform),
         )
     except Exception:
         logger.exception("Failed to send publication progress message to admin")
@@ -946,11 +999,12 @@ async def update_publication_progress(
     total: int,
     uploaded: int,
     status: str = "Publishing",
+    platform: str = "Threads",
 ) -> None:
     if not progress_message:
         return
     try:
-        await progress_message.edit_text(publication_progress_text(preview, total, uploaded, status=status))
+        await progress_message.edit_text(publication_progress_text(preview, total, uploaded, status=status, platform=platform))
     except Exception:
         logger.exception("Failed to update publication progress message")
 
@@ -1073,8 +1127,11 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     preview = publication_preview(text)
     progress_message: Optional[Message] = None
+    bluesky_progress_message: Optional[Message] = None
     uploaded_count = 0
+    bluesky_uploaded_count = 0
     total_parts = 0
+    bluesky_total_parts = 0
     try:
         post_ids: list[str] = []
         bluesky_post_uris: list[str] = []
@@ -1087,19 +1144,30 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             async def report_progress(uploaded: int, total: int, post_id: str) -> None:
                 nonlocal uploaded_count
                 uploaded_count = uploaded
-                await update_publication_progress(progress_message, preview, total, uploaded)
+                await update_publication_progress(progress_message, preview, total, uploaded, platform="Threads")
 
             post_ids = await publish_threads_chain_with_progress(parts, image_url=image_url, progress_callback=report_progress)
-            await update_publication_progress(progress_message, preview, total_parts, uploaded_count, status="Done")
+            await update_publication_progress(progress_message, preview, total_parts, uploaded_count, status="Done", platform="Threads")
 
         if bluesky_active:
             bluesky_parts = split_text_for_bluesky(text, source_url=telegram_post_url(message))
-            logger.info("Telegram message %s split into %s Bluesky part(s): %s", message.message_id, len(bluesky_parts), [len(part) for part in bluesky_parts])
-            bluesky_post_uris = publish_bluesky_chain(bluesky_parts, image_url=image_url)
+            bluesky_total_parts = len(bluesky_parts)
+            logger.info("Telegram message %s split into %s Bluesky part(s): %s", message.message_id, bluesky_total_parts, [len(part) for part in bluesky_parts])
+            bluesky_progress_message = await send_publication_progress(context, preview, bluesky_total_parts, platform="Bluesky")
+
+            async def report_bluesky_progress(uploaded: int, total: int, post_uri: str) -> None:
+                nonlocal bluesky_uploaded_count
+                bluesky_uploaded_count = uploaded
+                await update_publication_progress(bluesky_progress_message, preview, total, uploaded, platform="Bluesky")
+
+            bluesky_post_uris = await publish_bluesky_chain_with_progress(bluesky_parts, image_url=image_url, progress_callback=report_bluesky_progress)
+            await update_publication_progress(bluesky_progress_message, preview, bluesky_total_parts, bluesky_uploaded_count, status="Done", platform="Bluesky")
     except Exception:
         logger.exception("Failed to crosspost Telegram message %s", message.message_id)
         if progress_message:
-            await update_publication_progress(progress_message, preview, total_parts, uploaded_count, status="Failed")
+            await update_publication_progress(progress_message, preview, total_parts, uploaded_count, status="Failed", platform="Threads")
+        if bluesky_progress_message:
+            await update_publication_progress(bluesky_progress_message, preview, bluesky_total_parts, bluesky_uploaded_count, status="Failed", platform="Bluesky")
         return
 
     state["posted_count"] = int(state.get("posted_count", 0)) + 1
@@ -1273,6 +1341,7 @@ async def post_weekly_castaneda() -> None:
             parts = append_castaneda_telegram_link(parts)
             post_ids = publish_threads_chain(parts, image_url=image_url)
         if bluesky_active:
+            preview = publication_preview(text)
             bluesky_parts = split_text_for_bluesky(text) if text else ["Weekly Castaneda"]
             bluesky_parts = append_suffix_to_thread_parts(
                 bluesky_parts,
@@ -1280,7 +1349,16 @@ async def post_weekly_castaneda() -> None:
                 limit=BLUESKY_MAX_CHARS,
                 max_parts=BLUESKY_MAX_PARTS,
             )
-            bluesky_post_uris = publish_bluesky_chain(bluesky_parts, image_url=image_url)
+            bluesky_uploaded_count = 0
+            bluesky_progress_message = await send_publication_progress(None, preview, len(bluesky_parts), platform="Bluesky", bot=ADMIN_BOT)
+
+            async def report_weekly_bluesky_progress(uploaded: int, total: int, post_uri: str) -> None:
+                nonlocal bluesky_uploaded_count
+                bluesky_uploaded_count = uploaded
+                await update_publication_progress(bluesky_progress_message, preview, total, uploaded, platform="Bluesky")
+
+            bluesky_post_uris = await publish_bluesky_chain_with_progress(bluesky_parts, image_url=image_url, progress_callback=report_weekly_bluesky_progress)
+            await update_publication_progress(bluesky_progress_message, preview, len(bluesky_parts), bluesky_uploaded_count, status="Done", platform="Bluesky")
     except Exception:
         logger.exception("Failed to publish weekly Castaneda post")
         schedule_next_weekly_castaneda()
@@ -1333,11 +1411,13 @@ def configure_scheduler() -> AsyncIOScheduler:
 
 
 def main() -> None:
+    global ADMIN_BOT
     require_env()
     if CROSSPOST_IMAGES:
         ensure_r2_configured()
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(setup_bot_commands).build()
+    ADMIN_BOT = app.bot
     app.add_handler(CommandHandler("threads", threads_toggle_command))
     app.add_handler(CommandHandler("bluesky", bluesky_toggle_command))
     app.add_handler(CommandHandler("weekly_castaneda", weekly_castaneda_command))
