@@ -176,6 +176,7 @@ state = load_json(
         "latest_castaneda_post": None,
         "castaneda_post_index": [],
         "castaneda_threads_published_message_ids": [],
+        "castaneda_bluesky_published_message_ids": [],
         "threads_enabled": THREADS_ENABLED_DEFAULT,
         "bluesky_enabled": BLUESKY_ENABLED_DEFAULT,
         "max_thread_parts": MAX_THREAD_PARTS,
@@ -190,6 +191,7 @@ state.setdefault("weekly_castaneda_next_run", None)
 state.setdefault("latest_castaneda_post", None)
 state.setdefault("castaneda_post_index", [])
 state.setdefault("castaneda_threads_published_message_ids", [])
+state.setdefault("castaneda_bluesky_published_message_ids", [])
 state.setdefault("threads_enabled", THREADS_ENABLED_DEFAULT)
 state.setdefault("bluesky_enabled", BLUESKY_ENABLED_DEFAULT)
 state.setdefault("max_thread_parts", MAX_THREAD_PARTS)
@@ -328,6 +330,51 @@ async def post_castaneda_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.effective_message.reply_text("Failed to post Castaneda to Threads: " + platform_error_status(exc))
 
 
+async def post_castaneda_bluesky_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_non_admin(update):
+        return
+    if not bluesky_enabled():
+        await update.effective_message.reply_text("Bluesky posting is OFF.\n\n" + threads_status_text())
+        return
+    if not bluesky_configured():
+        await update.effective_message.reply_text("Bluesky credentials are missing.\n\n" + threads_status_text())
+        return
+
+    entry = newest_unpublished_castaneda_for_bluesky()
+    if not entry:
+        await update.effective_message.reply_text("No unpublished indexed Castaneda quotes for Bluesky yet.")
+        return
+
+    text = strip_html_tags(str(entry.get("text") or "").strip())
+    image_url = entry.get("image_url") or None
+    parts = split_text_for_bluesky(text) if text else ["Castaneda quote"]
+    if CASTANEDA_TELEGRAM_LINK:
+        parts = append_suffix_to_thread_parts(
+            parts,
+            f"\n\nMore daily quotes in Telegram:\n{CASTANEDA_TELEGRAM_LINK}",
+            limit=BLUESKY_MAX_CHARS,
+            max_parts=BLUESKY_MAX_PARTS,
+        )
+    preview = publication_preview(text or "Castaneda quote")
+    progress_message = await send_publication_progress(context, preview, len(parts), platform="Bluesky")
+    uploaded_count = 0
+
+    try:
+        async def report_progress(uploaded: int, total: int, post_uri: str) -> None:
+            nonlocal uploaded_count
+            uploaded_count = uploaded
+            await update_publication_progress(progress_message, preview, total, uploaded, platform="Bluesky")
+
+        post_uris = await publish_bluesky_chain_with_progress(parts, image_url=image_url, progress_callback=report_progress)
+        mark_castaneda_bluesky_published(entry)
+        await update_publication_progress(progress_message, preview, len(parts), uploaded_count, status="Done", platform="Bluesky")
+        await update.effective_message.reply_text("Castaneda posted to Bluesky: " + ", ".join(post_uris))
+    except Exception:
+        logger.exception("Failed to publish manual Castaneda post to Bluesky")
+        await update_publication_progress(progress_message, preview, len(parts), uploaded_count, status="Failed", platform="Bluesky")
+        await update.effective_message.reply_text("Failed to post Castaneda to Bluesky.")
+
+
 async def bluesky_toggle_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await reject_non_admin(update):
         return
@@ -415,6 +462,7 @@ async def setup_bot_commands(app: Application) -> None:
         BotCommand("bluesky", "Bluesky on/off"),
         BotCommand("weekly_castaneda", "Weekly Castaneda on/off"),
         BotCommand("post_castaneda", "Post Castaneda now"),
+        BotCommand("post_castaneda_bluesky", "Post Castaneda to Bluesky"),
         BotCommand("threads_parts", "Set max thread parts"),
         BotCommand("threads_status", "Threads status"),
     ]
@@ -517,6 +565,10 @@ def castaneda_threads_published_keys() -> set[str]:
     return {str(key) for key in state.get("castaneda_threads_published_message_ids", []) if key}
 
 
+def castaneda_bluesky_published_keys() -> set[str]:
+    return {str(key) for key in state.get("castaneda_bluesky_published_message_ids", []) if key}
+
+
 def mark_castaneda_threads_published(entry: dict) -> None:
     key = castaneda_post_key(entry)
     if not key:
@@ -528,9 +580,25 @@ def mark_castaneda_threads_published(entry: dict) -> None:
     save_state()
 
 
+def mark_castaneda_bluesky_published(entry: dict) -> None:
+    key = castaneda_post_key(entry)
+    if not key:
+        return
+    published = list(state.get("castaneda_bluesky_published_message_ids", []))
+    if key not in published:
+        published.append(key)
+    state["castaneda_bluesky_published_message_ids"] = published[-1000:]
+    save_state()
+
+
 def castaneda_entry_was_published_to_threads(entry: dict) -> bool:
     key = castaneda_post_key(entry)
     return bool(key and key in castaneda_threads_published_keys())
+
+
+def castaneda_entry_was_published_to_bluesky(entry: dict) -> bool:
+    key = castaneda_post_key(entry)
+    return bool(key and key in castaneda_bluesky_published_keys())
 
 
 def index_castaneda_post(entry: dict) -> None:
@@ -546,6 +614,14 @@ def index_castaneda_post(entry: dict) -> None:
 
 
 def newest_unpublished_castaneda_for_threads() -> Optional[dict]:
+    return newest_unpublished_castaneda_for_platform(castaneda_threads_published_keys())
+
+
+def newest_unpublished_castaneda_for_bluesky() -> Optional[dict]:
+    return newest_unpublished_castaneda_for_platform(castaneda_bluesky_published_keys())
+
+
+def newest_unpublished_castaneda_for_platform(published: set[str]) -> Optional[dict]:
     candidates = list(state.get("castaneda_post_index", []))
     latest = state.get("latest_castaneda_post")
     if isinstance(latest, dict):
@@ -553,7 +629,6 @@ def newest_unpublished_castaneda_for_threads() -> Optional[dict]:
         if latest_key and all(castaneda_post_key(item) != latest_key for item in candidates):
             candidates.append(latest)
 
-    published = castaneda_threads_published_keys()
     seen: set[str] = set()
     for entry in reversed(candidates):
         if not isinstance(entry, dict):
@@ -1515,31 +1590,35 @@ async def post_weekly_castaneda() -> None:
                 logger.exception("Failed to publish weekly Castaneda post to Threads")
 
     if bluesky_active:
-        preview = publication_preview(text)
-        bluesky_parts: list[str] = []
-        bluesky_uploaded_count = 0
-        bluesky_progress_message: Optional[Message] = None
-        try:
-            bluesky_parts = split_text_for_bluesky(text) if text else ["Weekly Castaneda"]
-            bluesky_parts = append_suffix_to_thread_parts(
-                bluesky_parts,
-                f"\n\nMore daily quotes in Telegram:\n{CASTANEDA_TELEGRAM_LINK}",
-                limit=BLUESKY_MAX_CHARS,
-                max_parts=BLUESKY_MAX_PARTS,
-            )
-            bluesky_progress_message = await send_publication_progress(None, preview, len(bluesky_parts), platform="Bluesky", bot=ADMIN_BOT)
+        if castaneda_entry_was_published_to_bluesky(latest):
+            logger.info("Skipping weekly Castaneda Bluesky post: message %s was already published", latest.get("message_id"))
+        else:
+            preview = publication_preview(text)
+            bluesky_parts: list[str] = []
+            bluesky_uploaded_count = 0
+            bluesky_progress_message: Optional[Message] = None
+            try:
+                bluesky_parts = split_text_for_bluesky(text) if text else ["Weekly Castaneda"]
+                bluesky_parts = append_suffix_to_thread_parts(
+                    bluesky_parts,
+                    f"\n\nMore daily quotes in Telegram:\n{CASTANEDA_TELEGRAM_LINK}",
+                    limit=BLUESKY_MAX_CHARS,
+                    max_parts=BLUESKY_MAX_PARTS,
+                )
+                bluesky_progress_message = await send_publication_progress(None, preview, len(bluesky_parts), platform="Bluesky", bot=ADMIN_BOT)
 
-            async def report_weekly_bluesky_progress(uploaded: int, total: int, post_uri: str) -> None:
-                nonlocal bluesky_uploaded_count
-                bluesky_uploaded_count = uploaded
-                await update_publication_progress(bluesky_progress_message, preview, total, uploaded, platform="Bluesky")
+                async def report_weekly_bluesky_progress(uploaded: int, total: int, post_uri: str) -> None:
+                    nonlocal bluesky_uploaded_count
+                    bluesky_uploaded_count = uploaded
+                    await update_publication_progress(bluesky_progress_message, preview, total, uploaded, platform="Bluesky")
 
-            bluesky_post_uris = await publish_bluesky_chain_with_progress(bluesky_parts, image_url=image_url, progress_callback=report_weekly_bluesky_progress)
-            await update_publication_progress(bluesky_progress_message, preview, len(bluesky_parts), bluesky_uploaded_count, status="Done", platform="Bluesky")
-        except Exception:
-            logger.exception("Failed to publish weekly Castaneda post to Bluesky")
-            if bluesky_progress_message:
-                await update_publication_progress(bluesky_progress_message, preview, len(bluesky_parts), bluesky_uploaded_count, status="Failed", platform="Bluesky")
+                bluesky_post_uris = await publish_bluesky_chain_with_progress(bluesky_parts, image_url=image_url, progress_callback=report_weekly_bluesky_progress)
+                mark_castaneda_bluesky_published(latest)
+                await update_publication_progress(bluesky_progress_message, preview, len(bluesky_parts), bluesky_uploaded_count, status="Done", platform="Bluesky")
+            except Exception:
+                logger.exception("Failed to publish weekly Castaneda post to Bluesky")
+                if bluesky_progress_message:
+                    await update_publication_progress(bluesky_progress_message, preview, len(bluesky_parts), bluesky_uploaded_count, status="Failed", platform="Bluesky")
 
     if not post_ids and not bluesky_post_uris:
         logger.error("Weekly Castaneda post was not published to any platform")
@@ -1607,6 +1686,7 @@ def main() -> None:
     app.add_handler(CommandHandler("bluesky", bluesky_toggle_command))
     app.add_handler(CommandHandler("weekly_castaneda", weekly_castaneda_command))
     app.add_handler(CommandHandler("post_castaneda", post_castaneda_command))
+    app.add_handler(CommandHandler("post_castaneda_bluesky", post_castaneda_bluesky_command))
     app.add_handler(CommandHandler("threads_parts", threads_parts_command))
     app.add_handler(CommandHandler("threads_status", threads_status_command))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, admin_text_message))
