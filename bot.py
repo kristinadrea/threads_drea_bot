@@ -1335,7 +1335,7 @@ def ensure_weekly_castaneda_next_run(force: bool = False) -> Optional[datetime]:
         return None
     now = timezone_now()
     run_at = parse_state_datetime(state.get("weekly_castaneda_next_run"))
-    if force or run_at is None or run_at <= now:
+    if force or run_at is None:
         run_at = next_random_weekly_castaneda_run(after=now)
         state["weekly_castaneda_next_run"] = run_at.isoformat()
         save_state()
@@ -1445,8 +1445,11 @@ async def post_weekly_castaneda() -> None:
 async def check_weekly_castaneda_due() -> None:
     if not weekly_castaneda_enabled():
         return
-    run_at = ensure_weekly_castaneda_next_run()
-    if run_at and timezone_now() >= run_at:
+    run_at = parse_state_datetime(state.get("weekly_castaneda_next_run"))
+    if run_at is None:
+        ensure_weekly_castaneda_next_run(force=True)
+        return
+    if timezone_now() >= run_at:
         await post_weekly_castaneda()
 
 
