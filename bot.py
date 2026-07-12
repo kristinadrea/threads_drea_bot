@@ -1139,10 +1139,11 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     bluesky_uploaded_count = 0
     total_parts = 0
     bluesky_total_parts = 0
-    try:
-        post_ids: list[str] = []
-        bluesky_post_uris: list[str] = []
-        if threads_enabled():
+    post_ids: list[str] = []
+    bluesky_post_uris: list[str] = []
+
+    if threads_enabled():
+        try:
             parts = maybe_add_telegram_link(split_text_for_threads(text, source_url=telegram_post_url(message)))
             total_parts = len(parts)
             logger.info("Telegram message %s split into %s Threads part(s): %s", message.message_id, total_parts, [len(part) for part in parts])
@@ -1155,8 +1156,13 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             post_ids = await publish_threads_chain_with_progress(parts, image_url=image_url, progress_callback=report_progress)
             await update_publication_progress(progress_message, preview, total_parts, uploaded_count, status="Done", platform="Threads")
+        except Exception:
+            logger.exception("Failed to crosspost Telegram message %s to Threads", message.message_id)
+            if progress_message:
+                await update_publication_progress(progress_message, preview, total_parts, uploaded_count, status="Failed", platform="Threads")
 
-        if bluesky_active:
+    if bluesky_active:
+        try:
             bluesky_parts = split_text_for_bluesky(text, source_url=telegram_post_url(message))
             bluesky_total_parts = len(bluesky_parts)
             logger.info("Telegram message %s split into %s Bluesky part(s): %s", message.message_id, bluesky_total_parts, [len(part) for part in bluesky_parts])
@@ -1169,12 +1175,13 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             bluesky_post_uris = await publish_bluesky_chain_with_progress(bluesky_parts, image_url=image_url, progress_callback=report_bluesky_progress)
             await update_publication_progress(bluesky_progress_message, preview, bluesky_total_parts, bluesky_uploaded_count, status="Done", platform="Bluesky")
-    except Exception:
-        logger.exception("Failed to crosspost Telegram message %s", message.message_id)
-        if progress_message:
-            await update_publication_progress(progress_message, preview, total_parts, uploaded_count, status="Failed", platform="Threads")
-        if bluesky_progress_message:
-            await update_publication_progress(bluesky_progress_message, preview, bluesky_total_parts, bluesky_uploaded_count, status="Failed", platform="Bluesky")
+        except Exception:
+            logger.exception("Failed to crosspost Telegram message %s to Bluesky", message.message_id)
+            if bluesky_progress_message:
+                await update_publication_progress(bluesky_progress_message, preview, bluesky_total_parts, bluesky_uploaded_count, status="Failed", platform="Bluesky")
+
+    if not post_ids and not bluesky_post_uris:
+        logger.error("Telegram message %s was not crossposted to any platform", message.message_id)
         return
 
     state["posted_count"] = int(state.get("posted_count", 0)) + 1
@@ -1340,15 +1347,23 @@ async def post_weekly_castaneda() -> None:
         schedule_next_weekly_castaneda()
         return
 
-    try:
-        post_ids: list[str] = []
-        bluesky_post_uris: list[str] = []
-        if threads_enabled():
+    post_ids: list[str] = []
+    bluesky_post_uris: list[str] = []
+
+    if threads_enabled():
+        try:
             parts = split_text_for_threads(text) if text else ["Weekly Castaneda"]
             parts = append_castaneda_telegram_link(parts)
             post_ids = publish_threads_chain(parts, image_url=image_url)
-        if bluesky_active:
-            preview = publication_preview(text)
+        except Exception:
+            logger.exception("Failed to publish weekly Castaneda post to Threads")
+
+    if bluesky_active:
+        preview = publication_preview(text)
+        bluesky_parts: list[str] = []
+        bluesky_uploaded_count = 0
+        bluesky_progress_message: Optional[Message] = None
+        try:
             bluesky_parts = split_text_for_bluesky(text) if text else ["Weekly Castaneda"]
             bluesky_parts = append_suffix_to_thread_parts(
                 bluesky_parts,
@@ -1356,7 +1371,6 @@ async def post_weekly_castaneda() -> None:
                 limit=BLUESKY_MAX_CHARS,
                 max_parts=BLUESKY_MAX_PARTS,
             )
-            bluesky_uploaded_count = 0
             bluesky_progress_message = await send_publication_progress(None, preview, len(bluesky_parts), platform="Bluesky", bot=ADMIN_BOT)
 
             async def report_weekly_bluesky_progress(uploaded: int, total: int, post_uri: str) -> None:
@@ -1366,8 +1380,13 @@ async def post_weekly_castaneda() -> None:
 
             bluesky_post_uris = await publish_bluesky_chain_with_progress(bluesky_parts, image_url=image_url, progress_callback=report_weekly_bluesky_progress)
             await update_publication_progress(bluesky_progress_message, preview, len(bluesky_parts), bluesky_uploaded_count, status="Done", platform="Bluesky")
-    except Exception:
-        logger.exception("Failed to publish weekly Castaneda post")
+        except Exception:
+            logger.exception("Failed to publish weekly Castaneda post to Bluesky")
+            if bluesky_progress_message:
+                await update_publication_progress(bluesky_progress_message, preview, len(bluesky_parts), bluesky_uploaded_count, status="Failed", platform="Bluesky")
+
+    if not post_ids and not bluesky_post_uris:
+        logger.error("Weekly Castaneda post was not published to any platform")
         schedule_next_weekly_castaneda()
         return
 
