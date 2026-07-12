@@ -157,6 +157,26 @@ def load_json(path: Path, default: dict) -> dict:
         raise
 
 
+def load_castaneda_quotes() -> list[str]:
+    if not CASTANEDA_QUOTES_FILE.exists():
+        logger.warning("Castaneda quotes file is missing: %s", CASTANEDA_QUOTES_FILE)
+        return []
+    raw_text = CASTANEDA_QUOTES_FILE.read_text(encoding="utf-8")
+    quotes = [quote.strip() for quote in re.split(r"\n\s*---\s*\n", raw_text) if quote.strip()]
+    return quotes
+
+
+def load_castaneda_media_urls() -> list[str]:
+    if not CASTANEDA_MEDIA_URLS_FILE.exists():
+        logger.warning("Castaneda media URLs file is missing: %s", CASTANEDA_MEDIA_URLS_FILE)
+        return []
+    return [
+        line.strip()
+        for line in CASTANEDA_MEDIA_URLS_FILE.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+
 def save_json(path: Path, backup_path: Path, payload: dict) -> None:
     if path.exists():
         backup_path.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
@@ -177,6 +197,8 @@ state = load_json(
         "castaneda_post_index": [],
         "castaneda_threads_published_message_ids": [],
         "castaneda_bluesky_published_message_ids": [],
+        "castaneda_threads_fallback_index": 0,
+        "castaneda_bluesky_fallback_index": 0,
         "threads_enabled": THREADS_ENABLED_DEFAULT,
         "bluesky_enabled": BLUESKY_ENABLED_DEFAULT,
         "max_thread_parts": MAX_THREAD_PARTS,
@@ -192,6 +214,8 @@ state.setdefault("latest_castaneda_post", None)
 state.setdefault("castaneda_post_index", [])
 state.setdefault("castaneda_threads_published_message_ids", [])
 state.setdefault("castaneda_bluesky_published_message_ids", [])
+state.setdefault("castaneda_threads_fallback_index", 0)
+state.setdefault("castaneda_bluesky_fallback_index", 0)
 state.setdefault("threads_enabled", THREADS_ENABLED_DEFAULT)
 state.setdefault("bluesky_enabled", BLUESKY_ENABLED_DEFAULT)
 state.setdefault("max_thread_parts", MAX_THREAD_PARTS)
@@ -613,15 +637,54 @@ def index_castaneda_post(entry: dict) -> None:
     state["castaneda_post_index"] = indexed[-500:]
 
 
+def fallback_state_key_for_platform(platform: str) -> str:
+    if platform == "bluesky":
+        return "castaneda_bluesky_fallback_index"
+    return "castaneda_threads_fallback_index"
+
+
+def fallback_castaneda_entry(index: int, quote: str, media_urls: list[str]) -> dict:
+    return {
+        "text": quote,
+        "image_url": media_urls[index % len(media_urls)] if media_urls else None,
+        "telegram_url": CASTANEDA_TELEGRAM_LINK,
+        "message_id": f"quote-{index}",
+        "chat_id": "fallback-castaneda",
+        "quote_index": index,
+        "source": "castaneda_quotes_file",
+        "stored_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def newest_unpublished_castaneda_from_files(platform: str, published: set[str]) -> Optional[dict]:
+    quotes = load_castaneda_quotes()
+    if not quotes:
+        return None
+    media_urls = load_castaneda_media_urls()
+    state_key = fallback_state_key_for_platform(platform)
+    start_index = int(state.get(state_key, 0) or 0) % len(quotes)
+
+    for offset in range(len(quotes)):
+        quote_index = (start_index + offset) % len(quotes)
+        entry = fallback_castaneda_entry(quote_index, quotes[quote_index], media_urls)
+        key = castaneda_post_key(entry)
+        if key and key not in published:
+            state[state_key] = (quote_index + 1) % len(quotes)
+            return entry
+    return None
+
+
 def newest_unpublished_castaneda_for_threads() -> Optional[dict]:
-    return newest_unpublished_castaneda_for_platform(castaneda_threads_published_keys())
+    published = castaneda_threads_published_keys()
+    return newest_unpublished_castaneda_for_platform("threads", published)
 
 
 def newest_unpublished_castaneda_for_bluesky() -> Optional[dict]:
-    return newest_unpublished_castaneda_for_platform(castaneda_bluesky_published_keys())
+    published = castaneda_bluesky_published_keys()
+    return newest_unpublished_castaneda_for_platform("bluesky", published)
 
 
-def newest_unpublished_castaneda_for_platform(published: set[str]) -> Optional[dict]:
+def newest_unpublished_castaneda_for_platform(platform: str, published: set[str]) -> Optional[dict]:
     candidates = list(state.get("castaneda_post_index", []))
     latest = state.get("latest_castaneda_post")
     if isinstance(latest, dict):
@@ -639,7 +702,7 @@ def newest_unpublished_castaneda_for_platform(published: set[str]) -> Optional[d
         seen.add(key)
         if entry.get("text") or entry.get("image_url"):
             return entry
-    return None
+    return newest_unpublished_castaneda_from_files(platform, published)
 
 
 def split_text_for_threads(
