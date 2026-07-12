@@ -63,6 +63,7 @@ BLUESKY_MAX_IMAGE_BYTES = int(os.getenv("BLUESKY_MAX_IMAGE_BYTES", str(2 * 1024 
 BLUESKY_TAGS = [tag.strip() for tag in os.getenv("BLUESKY_TAGS", "").split(",") if tag.strip()]
 BLUESKY_MIN_TAGS = int(os.getenv("BLUESKY_MIN_TAGS", "2"))
 BLUESKY_MAX_TAGS_PER_POST = int(os.getenv("BLUESKY_MAX_TAGS_PER_POST", "4"))
+URL_PATTERN = re.compile(r"https?://[^\s<>()]+")
 
 SEMANTIC_TAG_RULES = [
     ("Castaneda", ["castaneda", "don juan", "nagual", "tonal", "sorcerer", "warrior", "stalking", "dreaming", "intent", "assemblage point", "second attention", "impeccability"]),
@@ -1193,17 +1194,72 @@ def upload_bluesky_image(session: dict, image_url: Optional[str]) -> Optional[di
     return response.json().get("blob")
 
 
+def bluesky_urls_with_byte_ranges(text: str) -> list[tuple[str, int, int]]:
+    urls: list[tuple[str, int, int]] = []
+    for match in URL_PATTERN.finditer(text):
+        raw_url = match.group(0)
+        url = raw_url.rstrip(".,!?;:)]}")
+        if not url:
+            continue
+        start_char = match.start()
+        end_char = start_char + len(url)
+        byte_start = len(text[:start_char].encode("utf-8"))
+        byte_end = len(text[:end_char].encode("utf-8"))
+        urls.append((url, byte_start, byte_end))
+    return urls
+
+
+def bluesky_link_facets(text: str) -> list[dict]:
+    facets = []
+    for url, byte_start, byte_end in bluesky_urls_with_byte_ranges(text):
+        facets.append(
+            {
+                "index": {"byteStart": byte_start, "byteEnd": byte_end},
+                "features": [{"$type": "app.bsky.richtext.facet#link", "uri": url}],
+            }
+        )
+    return facets
+
+
+def bluesky_external_embed_for_text(text: str) -> Optional[dict]:
+    urls = bluesky_urls_with_byte_ranges(text)
+    if not urls:
+        return None
+    url = urls[0][0]
+    if "t.me/" in url or "telegram.me/" in url:
+        title = "More in Telegram"
+        description = "Open the original Telegram channel or post."
+    else:
+        title = "Open link"
+        description = url
+    return {
+        "$type": "app.bsky.embed.external",
+        "external": {
+            "uri": url,
+            "title": title,
+            "description": description,
+        },
+    }
+
+
 def create_bluesky_record(session: dict, text: str, image_blob: Optional[dict] = None, reply: Optional[dict] = None) -> dict:
     record = {
         "$type": "app.bsky.feed.post",
         "text": text,
         "createdAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
+    facets = bluesky_link_facets(text)
+    if facets:
+        record["facets"] = facets
     if image_blob:
         record["embed"] = {
             "$type": "app.bsky.embed.images",
             "images": [{"alt": BLUESKY_IMAGE_ALT, "image": image_blob}],
         }
+    else:
+        external_embed = bluesky_external_embed_for_text(text)
+        if external_embed:
+            record["embed"] = external_embed
     if reply:
         record["reply"] = reply
 
