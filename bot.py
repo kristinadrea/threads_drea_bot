@@ -253,6 +253,9 @@ def set_weekly_castaneda_enabled(enabled: bool) -> None:
 
 def threads_status_text() -> str:
     status = "ON" if threads_enabled() else "OFF"
+    threads_last_error = state.get("threads_last_error")
+    if threads_last_error:
+        status += f" ({threads_last_error})"
     bluesky_status = "ON" if bluesky_enabled() else "OFF"
     if bluesky_enabled() and not bluesky_configured():
         bluesky_status += " (missing handle/app password)"
@@ -662,6 +665,44 @@ def raise_for_threads_response(response: requests.Response, action: str) -> None
         response.raise_for_status()
     except requests.HTTPError as exc:
         raise RuntimeError(f"Threads {action} failed: {response.status_code} {response.text}") from exc
+
+
+def platform_error_status(exc: Exception) -> str:
+    text = str(exc)
+    if "API access blocked" in text:
+        return "Failed: API access blocked"
+    if "Error validating access token" in text or "Invalid OAuth" in text:
+        return "Failed: invalid token"
+    compact = re.sub(r"\s+", " ", text).strip()
+    return f"Failed: {compact[:80]}" if compact else "Failed"
+
+
+def remember_threads_error(exc: Exception) -> None:
+    state["threads_last_error"] = platform_error_status(exc).replace("Failed: ", "", 1)
+    save_state()
+
+
+def clear_threads_error() -> None:
+    if "threads_last_error" in state:
+        state.pop("threads_last_error", None)
+        save_state()
+
+
+def check_threads_api_access() -> None:
+    if not threads_enabled() or not THREADS_USER_ID or not THREADS_ACCESS_TOKEN:
+        return
+    try:
+        response = requests.get(
+            f"{THREADS_API_BASE}/me",
+            params={"fields": "id,username", "access_token": THREADS_ACCESS_TOKEN},
+            timeout=20,
+        )
+        raise_for_threads_response(response, "access check")
+        clear_threads_error()
+        logger.info("Threads API access check passed")
+    except Exception as exc:
+        remember_threads_error(exc)
+        logger.warning("Threads API access check failed: %s", platform_error_status(exc))
 
 
 def create_threads_container(text: str, media_type: str = "TEXT", image_url: Optional[str] = None, reply_to_id: Optional[str] = None) -> str:
@@ -1155,11 +1196,13 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await update_publication_progress(progress_message, preview, total, uploaded, platform="Threads")
 
             post_ids = await publish_threads_chain_with_progress(parts, image_url=image_url, progress_callback=report_progress)
+            clear_threads_error()
             await update_publication_progress(progress_message, preview, total_parts, uploaded_count, status="Done", platform="Threads")
-        except Exception:
+        except Exception as exc:
+            remember_threads_error(exc)
             logger.exception("Failed to crosspost Telegram message %s to Threads", message.message_id)
             if progress_message:
-                await update_publication_progress(progress_message, preview, total_parts, uploaded_count, status="Failed", platform="Threads")
+                await update_publication_progress(progress_message, preview, total_parts, uploaded_count, status=platform_error_status(exc), platform="Threads")
 
     if bluesky_active:
         try:
@@ -1355,7 +1398,9 @@ async def post_weekly_castaneda() -> None:
             parts = split_text_for_threads(text) if text else ["Weekly Castaneda"]
             parts = append_castaneda_telegram_link(parts)
             post_ids = publish_threads_chain(parts, image_url=image_url)
-        except Exception:
+            clear_threads_error()
+        except Exception as exc:
+            remember_threads_error(exc)
             logger.exception("Failed to publish weekly Castaneda post to Threads")
 
     if bluesky_active:
@@ -1453,6 +1498,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, handle_channel_post))
 
     scheduler = configure_scheduler()
+    check_threads_api_access()
     logger.info("threads_drea_bot started. Listening to %s. %s", ", ".join(SOURCE_CHANNEL_IDS), threads_status_text())
     try:
         app.run_polling(allowed_updates=["channel_post", "message"])
