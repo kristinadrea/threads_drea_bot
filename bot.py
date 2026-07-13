@@ -84,6 +84,37 @@ SEMANTIC_TAG_RULES = [
     ("Love", ["love", "heart", "compassion", "tender"]),
 ]
 DEFAULT_BLUESKY_TAGS = ["Spirituality", "Philosophy", "Awareness", "Quotes"]
+SPIRITUAL_QUESTIONS = [
+    "If your soul chose this life before you were born, what lesson do you think it came here to learn?",
+    "What if your biggest weakness is actually the doorway to your real power?",
+    "Do you think people meet by accident, or does the soul recognize certain people before the mind understands why?",
+    "If the universe keeps repeating the same lesson, why do you think you still resist it?",
+    "What if peace is not something you find, but something you stop disturbing?",
+    "Have you ever felt that a person entered your life just to awaken a part of you?",
+    "What if the life you are trying to escape is the exact place where your transformation begins?",
+    "Do you believe intuition is a higher intelligence, or just the mind noticing what it cannot yet explain?",
+    "What part of yourself are you still calling \"dark\" because you have not learned how to use its power?",
+    "If your pain had a message, what would it be trying to tell you?",
+    "What if the people who trigger you are showing you the places where you are still not free?",
+    "Is forgiveness really about the other person, or is it the moment your soul refuses to stay chained?",
+    "What if your anxiety is not a flaw, but energy looking for direction?",
+    "Have you ever outgrown a version of yourself but kept living as if you were still that person?",
+    "What if your \"bad timing\" was actually protection?",
+    "Do you think the universe tests your faith, or only reveals where you never truly had it?",
+    "What is one belief you had to lose in order to become more yourself?",
+    "If your higher self could send you one message today, what do you think it would say?",
+    "What if the real spiritual path is not becoming special, but becoming honest?",
+    "Why do we call it loneliness when sometimes it is just the soul asking us to listen?",
+    "What if the person you are becoming requires you to disappoint the person you used to be?",
+    "Do you think some endings are actually initiations?",
+    "What if your purpose is not one big mission, but the way your presence changes every room you enter?",
+    "If you stopped trying to be understood by everyone, what would you finally allow yourself to become?",
+    "What if the wound you keep hiding is the exact place where your medicine lives?",
+    "Do you think spiritual growth makes life easier, or simply makes you harder to deceive?",
+    "What if your intuition has been right all along, but your fear kept negotiating with it?",
+    "Is \"letting go\" an act of surrender, or the highest form of self-respect?",
+    "What if the universe does not give you what you want until you become the kind of person who can hold it?",
+]
 
 MAX_THREAD_CHARS = int(os.getenv("MAX_THREAD_CHARS", "480"))
 MAX_THREAD_PARTS = int(os.getenv("MAX_THREAD_PARTS", "5"))
@@ -105,6 +136,10 @@ WEEKLY_CASTANEDA_END_TIME = os.getenv("WEEKLY_CASTANEDA_END_TIME", "18:59")
 TIMEZONE = os.getenv("TIMEZONE", "America/New_York")
 CASTANEDA_QUOTES_FILE = Path(os.getenv("CASTANEDA_QUOTES_FILE", str(BASE_DIR / "castaneda_quotes.txt")))
 CASTANEDA_MEDIA_URLS_FILE = Path(os.getenv("CASTANEDA_MEDIA_URLS_FILE", str(BASE_DIR / "castaneda_media_urls.txt")))
+WEEKLY_SPIRITUAL_QUESTIONS_ENABLED = os.getenv("WEEKLY_SPIRITUAL_QUESTIONS_ENABLED", "true").lower() == "true"
+WEEKLY_SPIRITUAL_QUESTIONS_DAY = os.getenv("WEEKLY_SPIRITUAL_QUESTIONS_DAY", "wednesday").lower()
+WEEKLY_SPIRITUAL_QUESTIONS_START_TIME = os.getenv("WEEKLY_SPIRITUAL_QUESTIONS_START_TIME", "07:07")
+WEEKLY_SPIRITUAL_QUESTIONS_END_TIME = os.getenv("WEEKLY_SPIRITUAL_QUESTIONS_END_TIME", "18:59")
 
 R2_ENDPOINT_URL = os.getenv("R2_ENDPOINT_URL", "").strip()
 R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID", "").strip()
@@ -194,6 +229,9 @@ state = load_json(
         "weekly_castaneda_used_indexes": [],
         "weekly_castaneda_enabled": WEEKLY_CASTANEDA_ENABLED,
         "weekly_castaneda_next_run": None,
+        "weekly_spiritual_questions_enabled": WEEKLY_SPIRITUAL_QUESTIONS_ENABLED,
+        "weekly_spiritual_questions_next_run": None,
+        "weekly_spiritual_questions_index": 0,
         "latest_castaneda_post": None,
         "castaneda_post_index": [],
         "castaneda_threads_published_message_ids": [],
@@ -212,6 +250,9 @@ state.setdefault("telegram_message_ids", [])
 state.setdefault("weekly_castaneda_used_indexes", [])
 state.setdefault("weekly_castaneda_enabled", WEEKLY_CASTANEDA_ENABLED)
 state.setdefault("weekly_castaneda_next_run", None)
+state.setdefault("weekly_spiritual_questions_enabled", WEEKLY_SPIRITUAL_QUESTIONS_ENABLED)
+state.setdefault("weekly_spiritual_questions_next_run", None)
+state.setdefault("weekly_spiritual_questions_index", 0)
 state.setdefault("latest_castaneda_post", None)
 state.setdefault("castaneda_post_index", [])
 state.setdefault("castaneda_threads_published_message_ids", [])
@@ -275,6 +316,10 @@ def weekly_castaneda_enabled() -> bool:
     return bool(state.get("weekly_castaneda_enabled", WEEKLY_CASTANEDA_ENABLED))
 
 
+def weekly_spiritual_questions_enabled() -> bool:
+    return bool(state.get("weekly_spiritual_questions_enabled", WEEKLY_SPIRITUAL_QUESTIONS_ENABLED))
+
+
 def set_weekly_castaneda_enabled(enabled: bool) -> None:
     state["weekly_castaneda_enabled"] = enabled
     if enabled:
@@ -294,7 +339,9 @@ def threads_status_text() -> str:
         bluesky_status += " (missing handle/app password)"
     weekly_status = "ON" if weekly_castaneda_enabled() else "OFF"
     next_run = format_weekly_castaneda_next_run()
-    return f"Threads posting: {status}\nBluesky posting: {bluesky_status}\nMax thread parts: {get_max_thread_parts()}\nWeekly Castaneda: {weekly_status}\nNext Castaneda: {next_run}"
+    questions_status = "ON" if weekly_spiritual_questions_enabled() else "OFF"
+    next_questions = format_weekly_spiritual_questions_next_run()
+    return f"Threads posting: {status}\nBluesky posting: {bluesky_status}\nMax thread parts: {get_max_thread_parts()}\nWeekly Castaneda: {weekly_status}\nNext Castaneda: {next_run}\nWeekly questions: {questions_status}\nNext question: {next_questions}"
 
 
 async def reject_non_admin(update: Update) -> bool:
@@ -1587,7 +1634,7 @@ def timezone_now() -> datetime:
     return datetime.now(ZoneInfo(TIMEZONE))
 
 
-def weekly_day_index() -> int:
+def day_index(day_name: str, default: int) -> int:
     aliases = {
         "mon": 0,
         "monday": 0,
@@ -1604,7 +1651,15 @@ def weekly_day_index() -> int:
         "sun": 6,
         "sunday": 6,
     }
-    return aliases.get(WEEKLY_CASTANEDA_DAY, 3)
+    return aliases.get(day_name, default)
+
+
+def weekly_day_index() -> int:
+    return day_index(WEEKLY_CASTANEDA_DAY, 3)
+
+
+def weekly_spiritual_questions_day_index() -> int:
+    return day_index(WEEKLY_SPIRITUAL_QUESTIONS_DAY, 2)
 
 
 def next_random_weekly_castaneda_run(after: Optional[datetime] = None) -> datetime:
@@ -1635,6 +1690,34 @@ def next_random_weekly_castaneda_run(after: Optional[datetime] = None) -> dateti
     return run_at
 
 
+def next_random_weekly_spiritual_questions_run(after: Optional[datetime] = None) -> datetime:
+    now = (after or timezone_now()).astimezone(ZoneInfo(TIMEZONE))
+    target_day = weekly_spiritual_questions_day_index()
+    days_ahead = (target_day - now.weekday()) % 7
+    start_hour, start_minute = parse_hhmm(WEEKLY_SPIRITUAL_QUESTIONS_START_TIME)
+    end_hour, end_minute = parse_hhmm(WEEKLY_SPIRITUAL_QUESTIONS_END_TIME)
+    start_total = start_hour * 60 + start_minute
+    end_total = end_hour * 60 + end_minute
+    if end_total < start_total:
+        raise ValueError("WEEKLY_SPIRITUAL_QUESTIONS_END_TIME must be later than WEEKLY_SPIRITUAL_QUESTIONS_START_TIME")
+
+    if days_ahead == 0:
+        today_latest = datetime.combine(now.date(), datetime_time(end_hour, end_minute), tzinfo=now.tzinfo)
+        if now >= today_latest:
+            days_ahead = 7
+
+    run_date = (now + timedelta(days=days_ahead)).date()
+    random_minute = random.randint(start_total, end_total)
+    run_at = datetime.combine(
+        run_date,
+        datetime_time(random_minute // 60, random_minute % 60),
+        tzinfo=now.tzinfo,
+    )
+    if run_at <= now:
+        run_at = next_random_weekly_spiritual_questions_run(after=now + timedelta(days=1))
+    return run_at
+
+
 def parse_state_datetime(value: object) -> Optional[datetime]:
     if not isinstance(value, str) or not value:
         return None
@@ -1659,10 +1742,31 @@ def ensure_weekly_castaneda_next_run(force: bool = False) -> Optional[datetime]:
     return run_at
 
 
+def ensure_weekly_spiritual_questions_next_run(force: bool = False) -> Optional[datetime]:
+    if not weekly_spiritual_questions_enabled():
+        return None
+    now = timezone_now()
+    run_at = parse_state_datetime(state.get("weekly_spiritual_questions_next_run"))
+    if force or run_at is None:
+        run_at = next_random_weekly_spiritual_questions_run(after=now)
+        state["weekly_spiritual_questions_next_run"] = run_at.isoformat()
+        save_state()
+    return run_at
+
+
 def format_weekly_castaneda_next_run() -> str:
     if not weekly_castaneda_enabled():
         return "OFF"
     run_at = ensure_weekly_castaneda_next_run()
+    if not run_at:
+        return "not scheduled"
+    return run_at.strftime("%a %Y-%m-%d %H:%M %Z")
+
+
+def format_weekly_spiritual_questions_next_run() -> str:
+    if not weekly_spiritual_questions_enabled():
+        return "OFF"
+    run_at = ensure_weekly_spiritual_questions_next_run()
     if not run_at:
         return "not scheduled"
     return run_at.strftime("%a %Y-%m-%d %H:%M %Z")
@@ -1688,6 +1792,91 @@ def schedule_next_weekly_castaneda() -> None:
     state["weekly_castaneda_next_run"] = run_at.isoformat()
     save_state()
     logger.info("Next weekly Castaneda post scheduled for %s", run_at.isoformat())
+
+
+def schedule_next_weekly_spiritual_questions() -> None:
+    run_at = next_random_weekly_spiritual_questions_run(after=timezone_now() + timedelta(days=1))
+    state["weekly_spiritual_questions_next_run"] = run_at.isoformat()
+    save_state()
+    logger.info("Next weekly spiritual question scheduled for %s", run_at.isoformat())
+
+
+def next_spiritual_question() -> tuple[int, str]:
+    index = int(state.get("weekly_spiritual_questions_index", 0) or 0) % len(SPIRITUAL_QUESTIONS)
+    return index, SPIRITUAL_QUESTIONS[index]
+
+
+def advance_spiritual_question_index(index: int) -> None:
+    state["weekly_spiritual_questions_index"] = (index + 1) % len(SPIRITUAL_QUESTIONS)
+    save_state()
+
+
+async def post_weekly_spiritual_question() -> None:
+    bluesky_active = bluesky_enabled() and bluesky_configured()
+    if bluesky_enabled() and not bluesky_configured():
+        logger.warning("Skipping weekly spiritual question Bluesky post: missing handle/app password")
+
+    if not threads_enabled() and not bluesky_active:
+        logger.info("Skipping weekly spiritual question: Threads and Bluesky posting are disabled")
+        schedule_next_weekly_spiritual_questions()
+        return
+    if not weekly_spiritual_questions_enabled():
+        return
+
+    question_index, question = next_spiritual_question()
+    preview = publication_preview(question)
+    post_ids: list[str] = []
+    bluesky_post_uris: list[str] = []
+
+    if threads_enabled():
+        progress_message: Optional[Message] = None
+        uploaded_count = 0
+        parts: list[str] = []
+        try:
+            parts = split_text_for_threads(question)
+            progress_message = await send_publication_progress(None, preview, len(parts), platform="Threads", bot=ADMIN_BOT)
+
+            async def report_threads_progress(uploaded: int, total: int, post_id: str) -> None:
+                nonlocal uploaded_count
+                uploaded_count = uploaded
+                await update_publication_progress(progress_message, preview, total, uploaded, platform="Threads")
+
+            post_ids = await publish_threads_chain_with_progress(parts, progress_callback=report_threads_progress)
+            clear_threads_error()
+            await update_publication_progress(progress_message, preview, len(parts), uploaded_count, status="Done", platform="Threads")
+        except Exception as exc:
+            remember_threads_error(exc)
+            logger.exception("Failed to publish weekly spiritual question to Threads")
+            if progress_message:
+                await update_publication_progress(progress_message, preview, len(parts), uploaded_count, status=platform_error_status(exc), platform="Threads")
+
+    if bluesky_active:
+        bluesky_progress_message: Optional[Message] = None
+        bluesky_uploaded_count = 0
+        bluesky_parts: list[str] = []
+        try:
+            bluesky_parts = split_text_for_bluesky(question)
+            bluesky_progress_message = await send_publication_progress(None, preview, len(bluesky_parts), platform="Bluesky", bot=ADMIN_BOT)
+
+            async def report_bluesky_progress(uploaded: int, total: int, post_uri: str) -> None:
+                nonlocal bluesky_uploaded_count
+                bluesky_uploaded_count = uploaded
+                await update_publication_progress(bluesky_progress_message, preview, total, uploaded, platform="Bluesky")
+
+            bluesky_post_uris = await publish_bluesky_chain_with_progress(bluesky_parts, progress_callback=report_bluesky_progress)
+            await update_publication_progress(bluesky_progress_message, preview, len(bluesky_parts), bluesky_uploaded_count, status="Done", platform="Bluesky")
+        except Exception:
+            logger.exception("Failed to publish weekly spiritual question to Bluesky")
+            if bluesky_progress_message:
+                await update_publication_progress(bluesky_progress_message, preview, len(bluesky_parts), bluesky_uploaded_count, status="Failed", platform="Bluesky")
+
+    if post_ids or bluesky_post_uris:
+        advance_spiritual_question_index(question_index)
+        logger.info("Published weekly spiritual question %s", question_index)
+    else:
+        logger.error("Weekly spiritual question was not published to any platform")
+
+    schedule_next_weekly_spiritual_questions()
 
 
 async def post_weekly_castaneda() -> None:
@@ -1780,6 +1969,17 @@ async def check_weekly_castaneda_due() -> None:
         await post_weekly_castaneda()
 
 
+async def check_weekly_spiritual_questions_due() -> None:
+    if not weekly_spiritual_questions_enabled():
+        return
+    run_at = parse_state_datetime(state.get("weekly_spiritual_questions_next_run"))
+    if run_at is None:
+        ensure_weekly_spiritual_questions_next_run(force=True)
+        return
+    if timezone_now() >= run_at:
+        await post_weekly_spiritual_question()
+
+
 def strip_html_tags(text: str) -> str:
     return html.unescape(re.sub(r"<[^>]+>", "", text)).strip()
 
@@ -1802,11 +2002,23 @@ def configure_scheduler() -> AsyncIOScheduler:
         id="weekly_castaneda_check",
         replace_existing=True,
     )
+    scheduler.add_job(
+        check_weekly_spiritual_questions_due,
+        "interval",
+        minutes=1,
+        id="weekly_spiritual_questions_check",
+        replace_existing=True,
+    )
     if weekly_castaneda_enabled():
         run_at = ensure_weekly_castaneda_next_run()
         logger.info("Weekly Castaneda enabled: next run %s", run_at.isoformat() if run_at else "not scheduled")
     else:
         logger.info("Weekly Castaneda disabled")
+    if weekly_spiritual_questions_enabled():
+        run_at = ensure_weekly_spiritual_questions_next_run()
+        logger.info("Weekly spiritual questions enabled: next run %s", run_at.isoformat() if run_at else "not scheduled")
+    else:
+        logger.info("Weekly spiritual questions disabled")
     scheduler.start()
     return scheduler
 
