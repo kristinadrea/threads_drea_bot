@@ -320,6 +320,14 @@ def weekly_spiritual_questions_enabled() -> bool:
     return bool(state.get("weekly_spiritual_questions_enabled", WEEKLY_SPIRITUAL_QUESTIONS_ENABLED))
 
 
+def spiritual_questions_finished() -> bool:
+    try:
+        index = int(state.get("weekly_spiritual_questions_index", 0) or 0)
+    except (TypeError, ValueError):
+        index = 0
+    return index >= len(SPIRITUAL_QUESTIONS)
+
+
 def set_weekly_castaneda_enabled(enabled: bool) -> None:
     state["weekly_castaneda_enabled"] = enabled
     if enabled:
@@ -1745,6 +1753,11 @@ def ensure_weekly_castaneda_next_run(force: bool = False) -> Optional[datetime]:
 def ensure_weekly_spiritual_questions_next_run(force: bool = False) -> Optional[datetime]:
     if not weekly_spiritual_questions_enabled():
         return None
+    if spiritual_questions_finished():
+        state["weekly_spiritual_questions_enabled"] = False
+        state["weekly_spiritual_questions_next_run"] = None
+        save_state()
+        return None
     now = timezone_now()
     run_at = parse_state_datetime(state.get("weekly_spiritual_questions_next_run"))
     if force or run_at is None:
@@ -1764,6 +1777,8 @@ def format_weekly_castaneda_next_run() -> str:
 
 
 def format_weekly_spiritual_questions_next_run() -> str:
+    if spiritual_questions_finished():
+        return "finished"
     if not weekly_spiritual_questions_enabled():
         return "OFF"
     run_at = ensure_weekly_spiritual_questions_next_run()
@@ -1795,20 +1810,56 @@ def schedule_next_weekly_castaneda() -> None:
 
 
 def schedule_next_weekly_spiritual_questions() -> None:
+    if spiritual_questions_finished():
+        state["weekly_spiritual_questions_enabled"] = False
+        state["weekly_spiritual_questions_next_run"] = None
+        save_state()
+        logger.info("Weekly spiritual questions are finished; no next run scheduled")
+        return
     run_at = next_random_weekly_spiritual_questions_run(after=timezone_now() + timedelta(days=1))
     state["weekly_spiritual_questions_next_run"] = run_at.isoformat()
     save_state()
     logger.info("Next weekly spiritual question scheduled for %s", run_at.isoformat())
 
 
-def next_spiritual_question() -> tuple[int, str]:
-    index = int(state.get("weekly_spiritual_questions_index", 0) or 0) % len(SPIRITUAL_QUESTIONS)
+def next_spiritual_question() -> Optional[tuple[int, str]]:
+    try:
+        index = int(state.get("weekly_spiritual_questions_index", 0) or 0)
+    except (TypeError, ValueError):
+        index = 0
+    index = max(0, index)
+    if index >= len(SPIRITUAL_QUESTIONS):
+        return None
     return index, SPIRITUAL_QUESTIONS[index]
 
 
 def advance_spiritual_question_index(index: int) -> None:
-    state["weekly_spiritual_questions_index"] = (index + 1) % len(SPIRITUAL_QUESTIONS)
+    state["weekly_spiritual_questions_index"] = index + 1
     save_state()
+
+
+async def notify_admin(text: str, bot=None) -> None:
+    if not ADMIN_USER_ID:
+        return
+    telegram_bot = bot or ADMIN_BOT
+    if not telegram_bot:
+        return
+    try:
+        await telegram_bot.send_message(chat_id=int(ADMIN_USER_ID), text=text)
+    except Exception:
+        logger.exception("Failed to send admin notification")
+
+
+async def finish_weekly_spiritual_questions() -> None:
+    state["weekly_spiritual_questions_enabled"] = False
+    state["weekly_spiritual_questions_next_run"] = None
+    state["weekly_spiritual_questions_index"] = len(SPIRITUAL_QUESTIONS)
+    save_state()
+    logger.info("Weekly spiritual questions are finished")
+    await notify_admin(
+        "Weekly spiritual questions are finished.\n"
+        "Please add new questions before turning this schedule back on."
+    )
 
 
 async def post_weekly_spiritual_question() -> None:
@@ -1816,14 +1867,20 @@ async def post_weekly_spiritual_question() -> None:
     if bluesky_enabled() and not bluesky_configured():
         logger.warning("Skipping weekly spiritual question Bluesky post: missing handle/app password")
 
+    if not weekly_spiritual_questions_enabled():
+        return
+
+    question_item = next_spiritual_question()
+    if question_item is None:
+        await finish_weekly_spiritual_questions()
+        return
+    question_index, question = question_item
+
     if not threads_enabled() and not bluesky_active:
         logger.info("Skipping weekly spiritual question: Threads and Bluesky posting are disabled")
         schedule_next_weekly_spiritual_questions()
         return
-    if not weekly_spiritual_questions_enabled():
-        return
 
-    question_index, question = next_spiritual_question()
     preview = publication_preview(question)
     post_ids: list[str] = []
     bluesky_post_uris: list[str] = []
@@ -1873,6 +1930,9 @@ async def post_weekly_spiritual_question() -> None:
     if post_ids or bluesky_post_uris:
         advance_spiritual_question_index(question_index)
         logger.info("Published weekly spiritual question %s", question_index)
+        if spiritual_questions_finished():
+            await finish_weekly_spiritual_questions()
+            return
     else:
         logger.error("Weekly spiritual question was not published to any platform")
 
