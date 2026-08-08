@@ -241,6 +241,9 @@ state = load_json(
     {
         "posted_count": 0,
         "telegram_message_ids": [],
+        "telegram_threads_message_keys": [],
+        "telegram_bluesky_message_keys": [],
+        "telegram_mastodon_message_keys": [],
         "weekly_castaneda_used_indexes": [],
         "weekly_castaneda_enabled": WEEKLY_CASTANEDA_ENABLED,
         "weekly_castaneda_next_run": None,
@@ -265,6 +268,9 @@ state = load_json(
 )
 state.setdefault("posted_count", 0)
 state.setdefault("telegram_message_ids", [])
+state.setdefault("telegram_threads_message_keys", [])
+state.setdefault("telegram_bluesky_message_keys", [])
+state.setdefault("telegram_mastodon_message_keys", [])
 state.setdefault("weekly_castaneda_used_indexes", [])
 state.setdefault("weekly_castaneda_enabled", WEEKLY_CASTANEDA_ENABLED)
 state.setdefault("weekly_castaneda_next_run", None)
@@ -1798,12 +1804,19 @@ def cleanup_old_r2_media() -> None:
 
 
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.channel_post
+    message = update.channel_post or update.edited_channel_post
     if not message or not message_matches_source(message):
         return
 
-    if message.message_id in state.get("telegram_message_ids", []):
-        logger.info("Skipping already processed Telegram message %s", message.message_id)
+    threads_should_post = threads_enabled() and not message_was_posted_to_platform(message, "threads")
+    bluesky_active = bluesky_enabled() and bluesky_configured()
+    bluesky_should_post = bluesky_active and not message_was_posted_to_platform(message, "bluesky")
+    mastodon_active = mastodon_enabled() and mastodon_configured()
+    mastodon_should_post = mastodon_active and not message_was_posted_to_platform(message, "mastodon")
+
+    enabled_platforms = threads_enabled() or bluesky_active or mastodon_active
+    if enabled_platforms and not threads_should_post and not bluesky_should_post and not mastodon_should_post:
+        logger.info("Skipping Telegram message %s: already processed by every enabled platform", message.message_id)
         return
 
     if has_unsupported_media(message):
@@ -1837,8 +1850,6 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.info("Stored Castaneda message %s for weekly posting only", message.message_id)
             return
 
-    bluesky_active = bluesky_enabled() and bluesky_configured()
-    mastodon_active = mastodon_enabled() and mastodon_configured()
     if bluesky_enabled() and not bluesky_configured():
         logger.warning("Skipping Bluesky for Telegram message %s: missing handle/app password", message.message_id)
     if mastodon_enabled() and not mastodon_configured():
@@ -1863,7 +1874,7 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     bluesky_post_uris: list[str] = []
     mastodon_post_refs: list[str] = []
 
-    if threads_enabled():
+    if threads_should_post:
         try:
             parts = maybe_add_telegram_link(split_text_for_threads(text, source_url=telegram_post_url(message)))
             total_parts = len(parts)
@@ -1884,7 +1895,7 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             if progress_message:
                 await update_publication_progress(progress_message, preview, total_parts, uploaded_count, status=platform_error_status(exc), platform="Threads")
 
-    if bluesky_active:
+    if bluesky_should_post:
         try:
             bluesky_parts = split_text_for_bluesky(text, source_url=telegram_post_url(message))
             bluesky_total_parts = len(bluesky_parts)
@@ -1903,7 +1914,7 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             if bluesky_progress_message:
                 await update_publication_progress(bluesky_progress_message, preview, bluesky_total_parts, bluesky_uploaded_count, status="Failed", platform="Bluesky")
 
-    if mastodon_active:
+    if mastodon_should_post:
         try:
             mastodon_parts = split_text_for_mastodon(text, source_url=telegram_post_url(message))
             mastodon_total_parts = len(mastodon_parts)
@@ -1927,13 +1938,19 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     state["posted_count"] = int(state.get("posted_count", 0)) + 1
+    if post_ids:
+        remember_platform_message(message, "threads", save=False)
+    if bluesky_post_uris:
+        remember_platform_message(message, "bluesky", save=False)
+    if mastodon_post_refs:
+        remember_platform_message(message, "mastodon", save=False)
     remember_message(message.message_id, save=False)
     save_state()
-    if threads_enabled():
+    if threads_should_post:
         logger.info("Crossposted Telegram message %s to Threads posts: %s", message.message_id, ", ".join(post_ids))
-    if bluesky_active:
+    if bluesky_should_post:
         logger.info("Crossposted Telegram message %s to Bluesky posts: %s", message.message_id, ", ".join(bluesky_post_uris))
-    if mastodon_active:
+    if mastodon_should_post:
         logger.info("Crossposted Telegram message %s to Mastodon posts: %s", message.message_id, ", ".join(mastodon_post_refs))
 
 
@@ -1941,6 +1958,35 @@ def remember_message(message_id: int, save: bool = True) -> None:
     ids = state.setdefault("telegram_message_ids", [])
     ids.append(message_id)
     state["telegram_message_ids"] = ids[-1000:]
+    if save:
+        save_state()
+
+
+def telegram_message_key(message: Message) -> str:
+    return f"{message.chat_id}:{message.message_id}"
+
+
+def message_was_posted_to_platform(message: Message, platform: str) -> bool:
+    key = telegram_message_key(message)
+    keys = state.get(f"telegram_{platform}_message_keys", [])
+    if key in keys:
+        return True
+
+    # Before platform-specific tracking existed, the shared list represented
+    # successful Threads/Bluesky handling. Mastodon was added later and must
+    # not inherit those old entries, otherwise its first repost is blocked.
+    if platform in {"threads", "bluesky"}:
+        return message.message_id in state.get("telegram_message_ids", [])
+    return False
+
+
+def remember_platform_message(message: Message, platform: str, save: bool = True) -> None:
+    state_key = f"telegram_{platform}_message_keys"
+    keys = state.setdefault(state_key, [])
+    key = telegram_message_key(message)
+    if key not in keys:
+        keys.append(key)
+    state[state_key] = keys[-1000:]
     if save:
         save_state()
 
@@ -2496,7 +2542,7 @@ def main() -> None:
     check_threads_api_access()
     logger.info("threads_drea_bot started. Listening to %s. %s", ", ".join(SOURCE_CHANNEL_IDS), threads_status_text())
     try:
-        app.run_polling(allowed_updates=["channel_post", "message"])
+        app.run_polling(allowed_updates=["channel_post", "edited_channel_post", "message"])
     finally:
         try:
             scheduler.shutdown(wait=False)
