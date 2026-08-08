@@ -499,14 +499,8 @@ async def post_castaneda_command(update: Update, context: ContextTypes.DEFAULT_T
             await update_publication_progress(progress_message, preview, len(parts), uploaded_count, status="Failed", platform="Bluesky")
 
     if post_to_mastodon and not castaneda_entry_was_published_to_mastodon(entry):
-        parts = split_text_for_mastodon(text) if text else ["Castaneda quote"]
-        if CASTANEDA_TELEGRAM_LINK:
-            parts = append_suffix_to_thread_parts(
-                parts,
-                f"\n\nMore daily quotes in Telegram:\n{CASTANEDA_TELEGRAM_LINK}",
-                limit=MASTODON_MAX_CHARS,
-                max_parts=MASTODON_MAX_PARTS,
-            )
+        mastodon_source_url = entry.get("telegram_url") or CASTANEDA_TELEGRAM_LINK or None
+        parts = split_text_for_mastodon(text, source_url=mastodon_source_url) if text else ["Castaneda quote"]
         progress_message = await send_publication_progress(context, preview, len(parts), platform="Mastodon")
         uploaded_count = 0
 
@@ -1549,22 +1543,26 @@ def append_mastodon_tags(parts: list[str], source_text: str) -> list[str]:
 
 
 def split_text_for_mastodon(text: str, source_url: Optional[str] = None) -> list[str]:
-    truncated = bool(source_url) and text_exceeds_social_capacity(text, MASTODON_MAX_CHARS, MASTODON_MAX_PARTS)
-    parts = split_text_for_threads(
-        text,
-        limit=MASTODON_MAX_CHARS,
-        max_parts=MASTODON_MAX_PARTS,
-        truncation_suffix="",
-    )
-    parts = append_mastodon_tags(parts, text)
-    if truncated and source_url:
-        parts = append_suffix_to_thread_parts(
-            parts,
-            f"\n\nMore in Telegram:\n{source_url}",
-            limit=MASTODON_MAX_CHARS,
-            max_parts=MASTODON_MAX_PARTS,
-        )
-    return parts
+    normalized = re.sub(r"\n{3,}", "\n\n", text.strip())
+    tags = infer_mastodon_tags(normalized)
+    link_suffix = f"\n\nMore in Telegram:\n{source_url}" if source_url else ""
+
+    # Mastodon shows replies above their parent on profile pages. Keep every
+    # publication in one status so the reader always sees it in the right order.
+    for tag_count in range(len(tags), -1, -1):
+        tag_suffix = f"\n\n{' '.join(tags[:tag_count])}" if tag_count else ""
+        suffix = tag_suffix + link_suffix
+        available = MASTODON_MAX_CHARS - len(suffix)
+        if available < 2:
+            continue
+        if len(normalized) <= available:
+            return [normalized + suffix]
+
+        body = trim_to_sentence_or_readable_boundary(normalized, available - 1).rstrip()
+        if body:
+            return [body + "…" + suffix]
+
+    return [trim_to_sentence_or_readable_boundary(normalized, MASTODON_MAX_CHARS)]
 
 
 def mastodon_headers(idempotency_key: Optional[str] = None) -> dict[str, str]:
@@ -2418,14 +2416,8 @@ async def post_weekly_castaneda() -> None:
             mastodon_uploaded_count = 0
             mastodon_progress_message: Optional[Message] = None
             try:
-                mastodon_parts = split_text_for_mastodon(text) if text else ["Weekly Castaneda"]
-                if CASTANEDA_TELEGRAM_LINK:
-                    mastodon_parts = append_suffix_to_thread_parts(
-                        mastodon_parts,
-                        f"\n\nMore daily quotes in Telegram:\n{CASTANEDA_TELEGRAM_LINK}",
-                        limit=MASTODON_MAX_CHARS,
-                        max_parts=MASTODON_MAX_PARTS,
-                    )
+                mastodon_source_url = latest.get("telegram_url") or CASTANEDA_TELEGRAM_LINK or None
+                mastodon_parts = split_text_for_mastodon(text, source_url=mastodon_source_url) if text else ["Weekly Castaneda"]
                 mastodon_progress_message = await send_publication_progress(None, preview, len(mastodon_parts), platform="Mastodon", bot=ADMIN_BOT)
 
                 async def report_weekly_mastodon_progress(uploaded: int, total: int, post_ref: str) -> None:
