@@ -1,6 +1,6 @@
 # threads_drea_bot
 
-A small Python service that listens to a Telegram channel and crossposts suitable posts to Threads.
+A small Python service that listens to Telegram channels and crossposts suitable posts to Threads, Bluesky, and Mastodon.
 
 It is designed for original text and image posts. Audio, video, documents, voice messages, and generic files are skipped. Images are downloaded from Telegram, uploaded to Cloudflare R2, and then sent to Threads as public media URLs.
 
@@ -10,6 +10,7 @@ It is designed for original text and image posts. Audio, video, documents, voice
 - Crossposts text posts to Threads.
 - Crossposts Telegram photo posts to Threads when `CROSSPOST_IMAGES=true`.
 - Optionally crossposts the same Telegram posts to Bluesky.
+- Optionally crossposts the same Telegram posts to Mastodon.
 - Uploads Telegram photos to Cloudflare R2 before publishing, because Threads requires a public image URL.
 - Splits long Telegram posts into a Threads chain.
 - Skips audio, video, documents, voice messages, and unsupported media.
@@ -69,6 +70,29 @@ BLUESKY_TAGS=Spirituality,Philosophy,Awareness,Quotes
 
 Use an app password from Bluesky settings, not your main account password. The bot automatically adds 2-4 tags that match each post's text. `BLUESKY_TAGS` is optional fallback list for very short or unclear posts. Images larger than `BLUESKY_MAX_IMAGE_BYTES` are skipped for Bluesky, while the text still publishes.
 
+## Mastodon Crossposting
+
+Mastodon publishing uses the official REST API. The first post can include the Telegram image, and additional parts are published as replies to the previous status. It can be toggled from Telegram with `/mastodon`.
+
+Create a user access token on your Mastodon server with `write:statuses` and `write:media`, then configure:
+
+```env
+MASTODON_ENABLED=false
+MASTODON_BASE_URL=https://mastodon.social
+MASTODON_ACCESS_TOKEN=your-user-access-token
+MASTODON_MAX_CHARS=500
+MASTODON_MAX_PARTS=8
+MASTODON_VISIBILITY=public
+MASTODON_LANGUAGE=en
+MASTODON_IMAGE_ALT=
+MASTODON_MAX_IMAGE_BYTES=8388608
+MASTODON_MIN_TAGS=2
+MASTODON_MAX_TAGS_PER_POST=4
+MASTODON_TAGS=Spirituality,Philosophy,Awareness,Quotes
+```
+
+Set `MASTODON_BASE_URL` to the server where the account lives. The bot adds 2-4 relevant tags, uses the same Telegram-link behavior as Bluesky, and skips an oversized image while still publishing the text.
+
 ## Weekly Castaneda
 
 When `CASTANEDA_CHANNEL_ID` is one of the source channels, the bot remembers the latest Castaneda channel post it sees, including its R2 image URL when image crossposting is enabled. If weekly Castaneda is enabled, the bot posts that latest remembered quote every Thursday at a random time between `WEEKLY_CASTANEDA_START_TIME` and `WEEKLY_CASTANEDA_END_TIME` in `TIMEZONE`. The final Castaneda part includes `More daily quotes in Telegram:` plus `CASTANEDA_TELEGRAM_LINK`.
@@ -91,6 +115,7 @@ The command menu is scoped to `ADMIN_USER_ID`; global bot commands are cleared o
 
 - `/threads`: toggle Threads posting on/off.
 - `/bluesky`: toggle Bluesky posting on/off.
+- `/mastodon`: toggle Mastodon posting on/off.
 - `/weekly_castaneda`: toggle weekly Castaneda posting on/off.
 - `/threads_parts`: ask for and save the max number of parts per Threads chain. You can also send `/threads_parts 8`.
 - `/threads_status`: show current state, including max thread parts.

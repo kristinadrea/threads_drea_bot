@@ -7,6 +7,7 @@ import os
 import random
 import re
 import time
+import uuid
 from datetime import datetime, timedelta, timezone, time as datetime_time
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -63,6 +64,19 @@ BLUESKY_MAX_IMAGE_BYTES = int(os.getenv("BLUESKY_MAX_IMAGE_BYTES", str(2 * 1024 
 BLUESKY_TAGS = [tag.strip() for tag in os.getenv("BLUESKY_TAGS", "").split(",") if tag.strip()]
 BLUESKY_MIN_TAGS = int(os.getenv("BLUESKY_MIN_TAGS", "2"))
 BLUESKY_MAX_TAGS_PER_POST = int(os.getenv("BLUESKY_MAX_TAGS_PER_POST", "4"))
+
+MASTODON_BASE_URL = os.getenv("MASTODON_BASE_URL", "").strip().rstrip("/")
+MASTODON_ACCESS_TOKEN = os.getenv("MASTODON_ACCESS_TOKEN", "").strip()
+MASTODON_ENABLED_DEFAULT = os.getenv("MASTODON_ENABLED", "false").lower() == "true"
+MASTODON_MAX_CHARS = int(os.getenv("MASTODON_MAX_CHARS", "500"))
+MASTODON_MAX_PARTS = int(os.getenv("MASTODON_MAX_PARTS", "8"))
+MASTODON_VISIBILITY = os.getenv("MASTODON_VISIBILITY", "public").strip() or "public"
+MASTODON_LANGUAGE = os.getenv("MASTODON_LANGUAGE", "en").strip()
+MASTODON_IMAGE_ALT = os.getenv("MASTODON_IMAGE_ALT", "").strip()
+MASTODON_MAX_IMAGE_BYTES = int(os.getenv("MASTODON_MAX_IMAGE_BYTES", str(8 * 1024 * 1024)))
+MASTODON_TAGS = [tag.strip() for tag in os.getenv("MASTODON_TAGS", "").split(",") if tag.strip()]
+MASTODON_MIN_TAGS = int(os.getenv("MASTODON_MIN_TAGS", "2"))
+MASTODON_MAX_TAGS_PER_POST = int(os.getenv("MASTODON_MAX_TAGS_PER_POST", "4"))
 URL_PATTERN = re.compile(r"https?://[^\s<>()]+")
 
 SEMANTIC_TAG_RULES = [
@@ -84,6 +98,7 @@ SEMANTIC_TAG_RULES = [
     ("Love", ["love", "heart", "compassion", "tender"]),
 ]
 DEFAULT_BLUESKY_TAGS = ["Spirituality", "Philosophy", "Awareness", "Quotes"]
+DEFAULT_MASTODON_TAGS = ["Spirituality", "Philosophy", "Awareness", "Quotes"]
 SPIRITUAL_QUESTIONS = [
     "If your soul chose this life before you were born, what lesson do you think it came here to learn?",
     "What if your biggest weakness is actually the doorway to your real power?",
@@ -236,11 +251,14 @@ state = load_json(
         "castaneda_post_index": [],
         "castaneda_threads_published_message_ids": [],
         "castaneda_bluesky_published_message_ids": [],
+        "castaneda_mastodon_published_message_ids": [],
         "castaneda_threads_fallback_index": 0,
         "castaneda_bluesky_fallback_index": 0,
+        "castaneda_mastodon_fallback_index": 0,
         "castaneda_manual_fallback_index": 0,
         "threads_enabled": THREADS_ENABLED_DEFAULT,
         "bluesky_enabled": BLUESKY_ENABLED_DEFAULT,
+        "mastodon_enabled": MASTODON_ENABLED_DEFAULT,
         "max_thread_parts": MAX_THREAD_PARTS,
         "awaiting_threads_parts_user_id": None,
     },
@@ -257,11 +275,14 @@ state.setdefault("latest_castaneda_post", None)
 state.setdefault("castaneda_post_index", [])
 state.setdefault("castaneda_threads_published_message_ids", [])
 state.setdefault("castaneda_bluesky_published_message_ids", [])
+state.setdefault("castaneda_mastodon_published_message_ids", [])
 state.setdefault("castaneda_threads_fallback_index", 0)
 state.setdefault("castaneda_bluesky_fallback_index", 0)
+state.setdefault("castaneda_mastodon_fallback_index", 0)
 state.setdefault("castaneda_manual_fallback_index", 0)
 state.setdefault("threads_enabled", THREADS_ENABLED_DEFAULT)
 state.setdefault("bluesky_enabled", BLUESKY_ENABLED_DEFAULT)
+state.setdefault("mastodon_enabled", MASTODON_ENABLED_DEFAULT)
 state.setdefault("max_thread_parts", MAX_THREAD_PARTS)
 state.setdefault("awaiting_threads_parts_user_id", None)
 
@@ -290,6 +311,19 @@ def set_bluesky_enabled(enabled: bool) -> None:
 
 def bluesky_configured() -> bool:
     return bool(BLUESKY_HANDLE and BLUESKY_APP_PASSWORD)
+
+
+def mastodon_enabled() -> bool:
+    return bool(state.get("mastodon_enabled", MASTODON_ENABLED_DEFAULT))
+
+
+def set_mastodon_enabled(enabled: bool) -> None:
+    state["mastodon_enabled"] = enabled
+    save_state()
+
+
+def mastodon_configured() -> bool:
+    return bool(MASTODON_BASE_URL and MASTODON_ACCESS_TOKEN)
 
 
 def is_admin_update(update: Update) -> bool:
@@ -345,11 +379,14 @@ def threads_status_text() -> str:
     bluesky_status = "ON" if bluesky_enabled() else "OFF"
     if bluesky_enabled() and not bluesky_configured():
         bluesky_status += " (missing handle/app password)"
+    mastodon_status = "ON" if mastodon_enabled() else "OFF"
+    if mastodon_enabled() and not mastodon_configured():
+        mastodon_status += " (missing server/access token)"
     weekly_status = "ON" if weekly_castaneda_enabled() else "OFF"
     next_run = format_weekly_castaneda_next_run()
     questions_status = "ON" if weekly_spiritual_questions_enabled() else "OFF"
     next_questions = format_weekly_spiritual_questions_next_run()
-    return f"Threads posting: {status}\nBluesky posting: {bluesky_status}\nMax thread parts: {get_max_thread_parts()}\nWeekly Castaneda: {weekly_status}\nNext Castaneda: {next_run}\nWeekly questions: {questions_status}\nNext question: {next_questions}"
+    return f"Threads posting: {status}\nBluesky posting: {bluesky_status}\nMastodon posting: {mastodon_status}\nMax thread parts: {get_max_thread_parts()}\nWeekly Castaneda: {weekly_status}\nNext Castaneda: {next_run}\nWeekly questions: {questions_status}\nNext question: {next_questions}"
 
 
 async def reject_non_admin(update: Update) -> bool:
@@ -379,15 +416,22 @@ async def post_castaneda_command(update: Update, context: ContextTypes.DEFAULT_T
         return
     post_to_threads = threads_enabled()
     post_to_bluesky = bluesky_enabled() and bluesky_configured()
+    post_to_mastodon = mastodon_enabled() and mastodon_configured()
 
     if bluesky_enabled() and not bluesky_configured():
         logger.warning("Skipping manual Castaneda Bluesky post: missing handle/app password")
+    if mastodon_enabled() and not mastodon_configured():
+        logger.warning("Skipping manual Castaneda Mastodon post: missing server/access token")
 
-    if not post_to_threads and not post_to_bluesky:
-        await update.effective_message.reply_text("Threads and Bluesky posting are OFF or not configured.\n\n" + threads_status_text())
+    if not post_to_threads and not post_to_bluesky and not post_to_mastodon:
+        await update.effective_message.reply_text("Threads, Bluesky, and Mastodon posting are OFF or not configured.\n\n" + threads_status_text())
         return
 
-    entry = newest_unpublished_castaneda_for_manual(post_to_threads=post_to_threads, post_to_bluesky=post_to_bluesky)
+    entry = newest_unpublished_castaneda_for_manual(
+        post_to_threads=post_to_threads,
+        post_to_bluesky=post_to_bluesky,
+        post_to_mastodon=post_to_mastodon,
+    )
     if not entry:
         await update.effective_message.reply_text("No unpublished Castaneda quotes left for enabled platforms yet.")
         return
@@ -398,6 +442,7 @@ async def post_castaneda_command(update: Update, context: ContextTypes.DEFAULT_T
 
     threads_post_ids: list[str] = []
     bluesky_post_uris: list[str] = []
+    mastodon_post_refs: list[str] = []
     failures: list[str] = []
 
     if post_to_threads and not castaneda_entry_was_published_to_threads(entry):
@@ -447,6 +492,32 @@ async def post_castaneda_command(update: Update, context: ContextTypes.DEFAULT_T
             logger.exception("Failed to publish manual Castaneda post to Bluesky")
             await update_publication_progress(progress_message, preview, len(parts), uploaded_count, status="Failed", platform="Bluesky")
 
+    if post_to_mastodon and not castaneda_entry_was_published_to_mastodon(entry):
+        parts = split_text_for_mastodon(text) if text else ["Castaneda quote"]
+        if CASTANEDA_TELEGRAM_LINK:
+            parts = append_suffix_to_thread_parts(
+                parts,
+                f"\n\nMore daily quotes in Telegram:\n{CASTANEDA_TELEGRAM_LINK}",
+                limit=MASTODON_MAX_CHARS,
+                max_parts=MASTODON_MAX_PARTS,
+            )
+        progress_message = await send_publication_progress(context, preview, len(parts), platform="Mastodon")
+        uploaded_count = 0
+
+        try:
+            async def report_mastodon_progress(uploaded: int, total: int, post_ref: str) -> None:
+                nonlocal uploaded_count
+                uploaded_count = uploaded
+                await update_publication_progress(progress_message, preview, total, uploaded, platform="Mastodon")
+
+            mastodon_post_refs = await publish_mastodon_chain_with_progress(parts, image_url=image_url, progress_callback=report_mastodon_progress)
+            mark_castaneda_mastodon_published(entry)
+            await update_publication_progress(progress_message, preview, len(parts), uploaded_count, status="Done", platform="Mastodon")
+        except Exception as exc:
+            failures.append("Mastodon: " + platform_error_status(exc))
+            logger.exception("Failed to publish manual Castaneda post to Mastodon")
+            await update_publication_progress(progress_message, preview, len(parts), uploaded_count, status=platform_error_status(exc), platform="Mastodon")
+
     summary_parts = []
     if threads_post_ids:
         summary_parts.append("Threads: " + ", ".join(threads_post_ids))
@@ -456,6 +527,10 @@ async def post_castaneda_command(update: Update, context: ContextTypes.DEFAULT_T
         summary_parts.append("Bluesky: " + ", ".join(bluesky_post_uris))
     elif post_to_bluesky:
         summary_parts.append("Bluesky: already posted")
+    if mastodon_post_refs:
+        summary_parts.append("Mastodon: " + ", ".join(mastodon_post_refs))
+    elif post_to_mastodon:
+        summary_parts.append("Mastodon: already posted")
     summary_parts.extend(failures)
     await update.effective_message.reply_text("Castaneda post finished.\n" + "\n".join(summary_parts))
 
@@ -464,6 +539,13 @@ async def bluesky_toggle_command(update: Update, context: ContextTypes.DEFAULT_T
     if await reject_non_admin(update):
         return
     set_bluesky_enabled(not bluesky_enabled())
+    await update.effective_message.reply_text(threads_status_text())
+
+
+async def mastodon_toggle_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await reject_non_admin(update):
+        return
+    set_mastodon_enabled(not mastodon_enabled())
     await update.effective_message.reply_text(threads_status_text())
 
 
@@ -545,6 +627,7 @@ async def setup_bot_commands(app: Application) -> None:
     commands = [
         BotCommand("threads", "Threads on/off"),
         BotCommand("bluesky", "Bluesky on/off"),
+        BotCommand("mastodon", "Mastodon on/off"),
         BotCommand("weekly_castaneda", "Weekly Castaneda on/off"),
         BotCommand("post_castaneda", "Post Castaneda now"),
         BotCommand("threads_parts", "Set max thread parts"),
@@ -653,6 +736,10 @@ def castaneda_bluesky_published_keys() -> set[str]:
     return {str(key) for key in state.get("castaneda_bluesky_published_message_ids", []) if key}
 
 
+def castaneda_mastodon_published_keys() -> set[str]:
+    return {str(key) for key in state.get("castaneda_mastodon_published_message_ids", []) if key}
+
+
 def mark_castaneda_threads_published(entry: dict) -> None:
     key = castaneda_post_key(entry)
     if not key:
@@ -675,6 +762,17 @@ def mark_castaneda_bluesky_published(entry: dict) -> None:
     save_state()
 
 
+def mark_castaneda_mastodon_published(entry: dict) -> None:
+    key = castaneda_post_key(entry)
+    if not key:
+        return
+    published = list(state.get("castaneda_mastodon_published_message_ids", []))
+    if key not in published:
+        published.append(key)
+    state["castaneda_mastodon_published_message_ids"] = published[-1000:]
+    save_state()
+
+
 def castaneda_entry_was_published_to_threads(entry: dict) -> bool:
     key = castaneda_post_key(entry)
     return bool(key and key in castaneda_threads_published_keys())
@@ -683,6 +781,11 @@ def castaneda_entry_was_published_to_threads(entry: dict) -> bool:
 def castaneda_entry_was_published_to_bluesky(entry: dict) -> bool:
     key = castaneda_post_key(entry)
     return bool(key and key in castaneda_bluesky_published_keys())
+
+
+def castaneda_entry_was_published_to_mastodon(entry: dict) -> bool:
+    key = castaneda_post_key(entry)
+    return bool(key and key in castaneda_mastodon_published_keys())
 
 
 def index_castaneda_post(entry: dict) -> None:
@@ -702,6 +805,8 @@ def fallback_state_key_for_platform(platform: str) -> str:
         return "castaneda_manual_fallback_index"
     if platform == "bluesky":
         return "castaneda_bluesky_fallback_index"
+    if platform == "mastodon":
+        return "castaneda_mastodon_fallback_index"
     return "castaneda_threads_fallback_index"
 
 
@@ -746,12 +851,23 @@ def newest_unpublished_castaneda_for_bluesky() -> Optional[dict]:
     return newest_unpublished_castaneda_for_platform("bluesky", published)
 
 
-def newest_unpublished_castaneda_for_manual(post_to_threads: bool, post_to_bluesky: bool) -> Optional[dict]:
+def newest_unpublished_castaneda_for_mastodon() -> Optional[dict]:
+    published = castaneda_mastodon_published_keys()
+    return newest_unpublished_castaneda_for_platform("mastodon", published)
+
+
+def newest_unpublished_castaneda_for_manual(
+    post_to_threads: bool,
+    post_to_bluesky: bool,
+    post_to_mastodon: bool = False,
+) -> Optional[dict]:
     published_sets: list[set[str]] = []
     if post_to_threads:
         published_sets.append(castaneda_threads_published_keys())
     if post_to_bluesky:
         published_sets.append(castaneda_bluesky_published_keys())
+    if post_to_mastodon:
+        published_sets.append(castaneda_mastodon_published_keys())
     if not published_sets:
         return None
     fully_published = set.intersection(*published_sets) if len(published_sets) > 1 else published_sets[0]
@@ -1380,6 +1496,191 @@ async def publish_bluesky_chain_with_progress(
     return post_uris
 
 
+def infer_mastodon_tags(text: str) -> list[str]:
+    normalized_text = text.lower()
+    max_tags = max(1, MASTODON_MAX_TAGS_PER_POST)
+    min_tags = min(max(0, MASTODON_MIN_TAGS), max_tags)
+    scored_tags: list[tuple[int, int, str]] = []
+
+    for order, (tag, keywords) in enumerate(SEMANTIC_TAG_RULES):
+        score = sum(count_tag_keyword(normalized_text, keyword) for keyword in keywords)
+        if score:
+            scored_tags.append((-score, order, tag))
+
+    selected: list[str] = []
+    for _, _, tag in sorted(scored_tags):
+        normalized_tag = normalize_bluesky_tag(tag)
+        if normalized_tag and normalized_tag not in selected:
+            selected.append(normalized_tag)
+        if len(selected) >= max_tags:
+            return selected
+
+    fallback_tags = MASTODON_TAGS or DEFAULT_MASTODON_TAGS
+    for tag in fallback_tags:
+        normalized_tag = normalize_bluesky_tag(tag)
+        if normalized_tag and normalized_tag not in selected:
+            selected.append(normalized_tag)
+        if len(selected) >= max_tags:
+            break
+
+    if len(selected) < min_tags:
+        return selected
+    return selected[:max_tags]
+
+
+def append_mastodon_tags(parts: list[str], source_text: str) -> list[str]:
+    tags = infer_mastodon_tags(source_text)
+    if not tags:
+        return parts
+    parts = list(parts) or [""]
+
+    for tag_count in range(len(tags), 0, -1):
+        suffix = "\n\n" + " ".join(tags[:tag_count])
+        if len(parts[-1].rstrip()) + len(suffix) <= MASTODON_MAX_CHARS:
+            parts[-1] = parts[-1].rstrip() + suffix
+            return parts
+    return parts
+
+
+def split_text_for_mastodon(text: str, source_url: Optional[str] = None) -> list[str]:
+    truncated = bool(source_url) and text_exceeds_social_capacity(text, MASTODON_MAX_CHARS, MASTODON_MAX_PARTS)
+    parts = split_text_for_threads(
+        text,
+        limit=MASTODON_MAX_CHARS,
+        max_parts=MASTODON_MAX_PARTS,
+        truncation_suffix="",
+    )
+    parts = append_mastodon_tags(parts, text)
+    if truncated and source_url:
+        parts = append_suffix_to_thread_parts(
+            parts,
+            f"\n\nMore in Telegram:\n{source_url}",
+            limit=MASTODON_MAX_CHARS,
+            max_parts=MASTODON_MAX_PARTS,
+        )
+    return parts
+
+
+def mastodon_headers(idempotency_key: Optional[str] = None) -> dict[str, str]:
+    headers = {"Authorization": f"Bearer {MASTODON_ACCESS_TOKEN}"}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    return headers
+
+
+def raise_for_mastodon_response(response: requests.Response, action: str) -> None:
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        raise RuntimeError(f"Mastodon {action} failed: {response.status_code} {response.text}") from exc
+
+
+def download_image_for_mastodon(image_url: str) -> Optional[tuple[bytes, str]]:
+    response = requests.get(image_url, timeout=30)
+    response.raise_for_status()
+    content = response.content
+    if len(content) > MASTODON_MAX_IMAGE_BYTES:
+        logger.warning("Skipping Mastodon image: %s bytes is larger than %s", len(content), MASTODON_MAX_IMAGE_BYTES)
+        return None
+    content_type = response.headers.get("content-type", "image/jpeg").split(";", 1)[0]
+    if not content_type.startswith("image/"):
+        content_type = "image/jpeg"
+    return content, content_type
+
+
+def upload_mastodon_image(image_url: Optional[str]) -> Optional[str]:
+    if not image_url:
+        return None
+    downloaded = download_image_for_mastodon(image_url)
+    if not downloaded:
+        return None
+    content, content_type = downloaded
+    extension = mimetypes.guess_extension(content_type) or ".jpg"
+    response = requests.post(
+        f"{MASTODON_BASE_URL}/api/v2/media",
+        headers=mastodon_headers(),
+        files={"file": (f"image{extension}", content, content_type)},
+        data={"description": MASTODON_IMAGE_ALT} if MASTODON_IMAGE_ALT else None,
+        timeout=60,
+    )
+    raise_for_mastodon_response(response, "media upload")
+    media_id = str(response.json().get("id") or "")
+    if not media_id:
+        raise RuntimeError(f"Mastodon media response did not include id: {response.text}")
+    return media_id
+
+
+def create_mastodon_status(
+    text: str,
+    media_id: Optional[str] = None,
+    reply_to_id: Optional[str] = None,
+) -> dict:
+    if not mastodon_configured():
+        raise RuntimeError("Mastodon credentials are missing: add MASTODON_BASE_URL and MASTODON_ACCESS_TOKEN")
+    payload: dict[str, str] = {
+        "status": text,
+        "visibility": MASTODON_VISIBILITY,
+    }
+    if MASTODON_LANGUAGE:
+        payload["language"] = MASTODON_LANGUAGE
+    if media_id:
+        payload["media_ids[]"] = media_id
+    if reply_to_id:
+        payload["in_reply_to_id"] = reply_to_id
+
+    response = requests.post(
+        f"{MASTODON_BASE_URL}/api/v1/statuses",
+        headers=mastodon_headers(str(uuid.uuid4())),
+        data=payload,
+        timeout=30,
+    )
+    raise_for_mastodon_response(response, "status creation")
+    created = response.json()
+    if not created.get("id"):
+        raise RuntimeError(f"Mastodon status response did not include id: {response.text}")
+    return created
+
+
+def publish_mastodon_chain(parts: Iterable[str], image_url: Optional[str] = None) -> list[str]:
+    if not mastodon_enabled() or not mastodon_configured():
+        return []
+    parts = list(parts)
+    media_id = upload_mastodon_image(image_url)
+    post_refs: list[str] = []
+    previous_id: Optional[str] = None
+
+    for index, part in enumerate(parts):
+        logger.info("Publishing Mastodon part %s/%s (%s chars)", index + 1, len(parts), len(part))
+        created = create_mastodon_status(part, media_id=media_id if index == 0 else None, reply_to_id=previous_id)
+        previous_id = str(created["id"])
+        post_refs.append(str(created.get("url") or previous_id))
+    return post_refs
+
+
+async def publish_mastodon_chain_with_progress(
+    parts: Iterable[str],
+    image_url: Optional[str] = None,
+    progress_callback: Optional[Callable[[int, int, str], Awaitable[None]]] = None,
+) -> list[str]:
+    if not mastodon_enabled() or not mastodon_configured():
+        return []
+    parts = list(parts)
+    media_id = upload_mastodon_image(image_url)
+    post_refs: list[str] = []
+    previous_id: Optional[str] = None
+    total = len(parts)
+
+    for index, part in enumerate(parts):
+        logger.info("Publishing Mastodon part %s/%s (%s chars)", index + 1, total, len(part))
+        created = create_mastodon_status(part, media_id=media_id if index == 0 else None, reply_to_id=previous_id)
+        previous_id = str(created["id"])
+        post_ref = str(created.get("url") or previous_id)
+        post_refs.append(post_ref)
+        if progress_callback:
+            await progress_callback(index + 1, total, post_ref)
+    return post_refs
+
+
 def publication_preview(text: str) -> str:
     first_line = next((line.strip() for line in text.splitlines() if line.strip()), "[image only]")
     if len(first_line) > 140:
@@ -1537,23 +1838,30 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
 
     bluesky_active = bluesky_enabled() and bluesky_configured()
+    mastodon_active = mastodon_enabled() and mastodon_configured()
     if bluesky_enabled() and not bluesky_configured():
         logger.warning("Skipping Bluesky for Telegram message %s: missing handle/app password", message.message_id)
+    if mastodon_enabled() and not mastodon_configured():
+        logger.warning("Skipping Mastodon for Telegram message %s: missing server/access token", message.message_id)
 
-    if not threads_enabled() and not bluesky_active:
-        logger.info("Skipping Telegram message %s: Threads and Bluesky posting are disabled", message.message_id)
+    if not threads_enabled() and not bluesky_active and not mastodon_active:
+        logger.info("Skipping Telegram message %s: Threads, Bluesky, and Mastodon posting are disabled", message.message_id)
         remember_message(message.message_id)
         return
 
     preview = publication_preview(text)
     progress_message: Optional[Message] = None
     bluesky_progress_message: Optional[Message] = None
+    mastodon_progress_message: Optional[Message] = None
     uploaded_count = 0
     bluesky_uploaded_count = 0
+    mastodon_uploaded_count = 0
     total_parts = 0
     bluesky_total_parts = 0
+    mastodon_total_parts = 0
     post_ids: list[str] = []
     bluesky_post_uris: list[str] = []
+    mastodon_post_refs: list[str] = []
 
     if threads_enabled():
         try:
@@ -1595,7 +1903,26 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             if bluesky_progress_message:
                 await update_publication_progress(bluesky_progress_message, preview, bluesky_total_parts, bluesky_uploaded_count, status="Failed", platform="Bluesky")
 
-    if not post_ids and not bluesky_post_uris:
+    if mastodon_active:
+        try:
+            mastodon_parts = split_text_for_mastodon(text, source_url=telegram_post_url(message))
+            mastodon_total_parts = len(mastodon_parts)
+            logger.info("Telegram message %s split into %s Mastodon part(s): %s", message.message_id, mastodon_total_parts, [len(part) for part in mastodon_parts])
+            mastodon_progress_message = await send_publication_progress(context, preview, mastodon_total_parts, platform="Mastodon")
+
+            async def report_mastodon_progress(uploaded: int, total: int, post_ref: str) -> None:
+                nonlocal mastodon_uploaded_count
+                mastodon_uploaded_count = uploaded
+                await update_publication_progress(mastodon_progress_message, preview, total, uploaded, platform="Mastodon")
+
+            mastodon_post_refs = await publish_mastodon_chain_with_progress(mastodon_parts, image_url=image_url, progress_callback=report_mastodon_progress)
+            await update_publication_progress(mastodon_progress_message, preview, mastodon_total_parts, mastodon_uploaded_count, status="Done", platform="Mastodon")
+        except Exception as exc:
+            logger.exception("Failed to crosspost Telegram message %s to Mastodon", message.message_id)
+            if mastodon_progress_message:
+                await update_publication_progress(mastodon_progress_message, preview, mastodon_total_parts, mastodon_uploaded_count, status=platform_error_status(exc), platform="Mastodon")
+
+    if not post_ids and not bluesky_post_uris and not mastodon_post_refs:
         logger.error("Telegram message %s was not crossposted to any platform", message.message_id)
         return
 
@@ -1606,6 +1933,8 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.info("Crossposted Telegram message %s to Threads posts: %s", message.message_id, ", ".join(post_ids))
     if bluesky_active:
         logger.info("Crossposted Telegram message %s to Bluesky posts: %s", message.message_id, ", ".join(bluesky_post_uris))
+    if mastodon_active:
+        logger.info("Crossposted Telegram message %s to Mastodon posts: %s", message.message_id, ", ".join(mastodon_post_refs))
 
 
 def remember_message(message_id: int, save: bool = True) -> None:
@@ -1864,8 +2193,11 @@ async def finish_weekly_spiritual_questions() -> None:
 
 async def post_weekly_spiritual_question() -> None:
     bluesky_active = bluesky_enabled() and bluesky_configured()
+    mastodon_active = mastodon_enabled() and mastodon_configured()
     if bluesky_enabled() and not bluesky_configured():
         logger.warning("Skipping weekly spiritual question Bluesky post: missing handle/app password")
+    if mastodon_enabled() and not mastodon_configured():
+        logger.warning("Skipping weekly spiritual question Mastodon post: missing server/access token")
 
     if not weekly_spiritual_questions_enabled():
         return
@@ -1876,14 +2208,15 @@ async def post_weekly_spiritual_question() -> None:
         return
     question_index, question = question_item
 
-    if not threads_enabled() and not bluesky_active:
-        logger.info("Skipping weekly spiritual question: Threads and Bluesky posting are disabled")
+    if not threads_enabled() and not bluesky_active and not mastodon_active:
+        logger.info("Skipping weekly spiritual question: Threads, Bluesky, and Mastodon posting are disabled")
         schedule_next_weekly_spiritual_questions()
         return
 
     preview = publication_preview(question)
     post_ids: list[str] = []
     bluesky_post_uris: list[str] = []
+    mastodon_post_refs: list[str] = []
 
     if threads_enabled():
         progress_message: Optional[Message] = None
@@ -1927,7 +2260,27 @@ async def post_weekly_spiritual_question() -> None:
             if bluesky_progress_message:
                 await update_publication_progress(bluesky_progress_message, preview, len(bluesky_parts), bluesky_uploaded_count, status="Failed", platform="Bluesky")
 
-    if post_ids or bluesky_post_uris:
+    if mastodon_active:
+        mastodon_progress_message: Optional[Message] = None
+        mastodon_uploaded_count = 0
+        mastodon_parts: list[str] = []
+        try:
+            mastodon_parts = split_text_for_mastodon(question)
+            mastodon_progress_message = await send_publication_progress(None, preview, len(mastodon_parts), platform="Mastodon", bot=ADMIN_BOT)
+
+            async def report_mastodon_progress(uploaded: int, total: int, post_ref: str) -> None:
+                nonlocal mastodon_uploaded_count
+                mastodon_uploaded_count = uploaded
+                await update_publication_progress(mastodon_progress_message, preview, total, uploaded, platform="Mastodon")
+
+            mastodon_post_refs = await publish_mastodon_chain_with_progress(mastodon_parts, progress_callback=report_mastodon_progress)
+            await update_publication_progress(mastodon_progress_message, preview, len(mastodon_parts), mastodon_uploaded_count, status="Done", platform="Mastodon")
+        except Exception as exc:
+            logger.exception("Failed to publish weekly spiritual question to Mastodon")
+            if mastodon_progress_message:
+                await update_publication_progress(mastodon_progress_message, preview, len(mastodon_parts), mastodon_uploaded_count, status=platform_error_status(exc), platform="Mastodon")
+
+    if post_ids or bluesky_post_uris or mastodon_post_refs:
         advance_spiritual_question_index(question_index)
         logger.info("Published weekly spiritual question %s", question_index)
         if spiritual_questions_finished():
@@ -1941,11 +2294,14 @@ async def post_weekly_spiritual_question() -> None:
 
 async def post_weekly_castaneda() -> None:
     bluesky_active = bluesky_enabled() and bluesky_configured()
+    mastodon_active = mastodon_enabled() and mastodon_configured()
     if bluesky_enabled() and not bluesky_configured():
         logger.warning("Skipping weekly Castaneda Bluesky post: missing handle/app password")
+    if mastodon_enabled() and not mastodon_configured():
+        logger.warning("Skipping weekly Castaneda Mastodon post: missing server/access token")
 
-    if not threads_enabled() and not bluesky_active:
-        logger.info("Skipping weekly Castaneda post: Threads and Bluesky posting are disabled")
+    if not threads_enabled() and not bluesky_active and not mastodon_active:
+        logger.info("Skipping weekly Castaneda post: Threads, Bluesky, and Mastodon posting are disabled")
         return
     if not weekly_castaneda_enabled():
         return
@@ -1960,6 +2316,7 @@ async def post_weekly_castaneda() -> None:
 
     post_ids: list[str] = []
     bluesky_post_uris: list[str] = []
+    mastodon_post_refs: list[str] = []
 
     if threads_enabled():
         if castaneda_entry_was_published_to_threads(latest):
@@ -2006,7 +2363,39 @@ async def post_weekly_castaneda() -> None:
                 if bluesky_progress_message:
                     await update_publication_progress(bluesky_progress_message, preview, len(bluesky_parts), bluesky_uploaded_count, status="Failed", platform="Bluesky")
 
-    if not post_ids and not bluesky_post_uris:
+    if mastodon_active:
+        if castaneda_entry_was_published_to_mastodon(latest):
+            logger.info("Skipping weekly Castaneda Mastodon post: message %s was already published", latest.get("message_id"))
+        else:
+            preview = publication_preview(text)
+            mastodon_parts: list[str] = []
+            mastodon_uploaded_count = 0
+            mastodon_progress_message: Optional[Message] = None
+            try:
+                mastodon_parts = split_text_for_mastodon(text) if text else ["Weekly Castaneda"]
+                if CASTANEDA_TELEGRAM_LINK:
+                    mastodon_parts = append_suffix_to_thread_parts(
+                        mastodon_parts,
+                        f"\n\nMore daily quotes in Telegram:\n{CASTANEDA_TELEGRAM_LINK}",
+                        limit=MASTODON_MAX_CHARS,
+                        max_parts=MASTODON_MAX_PARTS,
+                    )
+                mastodon_progress_message = await send_publication_progress(None, preview, len(mastodon_parts), platform="Mastodon", bot=ADMIN_BOT)
+
+                async def report_weekly_mastodon_progress(uploaded: int, total: int, post_ref: str) -> None:
+                    nonlocal mastodon_uploaded_count
+                    mastodon_uploaded_count = uploaded
+                    await update_publication_progress(mastodon_progress_message, preview, total, uploaded, platform="Mastodon")
+
+                mastodon_post_refs = await publish_mastodon_chain_with_progress(mastodon_parts, image_url=image_url, progress_callback=report_weekly_mastodon_progress)
+                mark_castaneda_mastodon_published(latest)
+                await update_publication_progress(mastodon_progress_message, preview, len(mastodon_parts), mastodon_uploaded_count, status="Done", platform="Mastodon")
+            except Exception as exc:
+                logger.exception("Failed to publish weekly Castaneda post to Mastodon")
+                if mastodon_progress_message:
+                    await update_publication_progress(mastodon_progress_message, preview, len(mastodon_parts), mastodon_uploaded_count, status=platform_error_status(exc), platform="Mastodon")
+
+    if not post_ids and not bluesky_post_uris and not mastodon_post_refs:
         logger.error("Weekly Castaneda post was not published to any platform")
         schedule_next_weekly_castaneda()
         return
@@ -2016,6 +2405,8 @@ async def post_weekly_castaneda() -> None:
         logger.info("Published weekly Castaneda post to Threads posts: %s", ", ".join(post_ids))
     if bluesky_active:
         logger.info("Published weekly Castaneda post to Bluesky posts: %s", ", ".join(bluesky_post_uris))
+    if mastodon_active:
+        logger.info("Published weekly Castaneda post to Mastodon posts: %s", ", ".join(mastodon_post_refs))
 
 
 async def check_weekly_castaneda_due() -> None:
@@ -2093,6 +2484,7 @@ def main() -> None:
     ADMIN_BOT = app.bot
     app.add_handler(CommandHandler("threads", threads_toggle_command))
     app.add_handler(CommandHandler("bluesky", bluesky_toggle_command))
+    app.add_handler(CommandHandler("mastodon", mastodon_toggle_command))
     app.add_handler(CommandHandler("weekly_castaneda", weekly_castaneda_command))
     app.add_handler(CommandHandler("post_castaneda", post_castaneda_command))
     app.add_handler(CommandHandler("threads_parts", threads_parts_command))
