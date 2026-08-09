@@ -1141,9 +1141,10 @@ def check_threads_api_access() -> None:
 def create_threads_container(text: str, media_type: str = "TEXT", image_url: Optional[str] = None, reply_to_id: Optional[str] = None) -> str:
     payload = {
         "media_type": media_type,
-        "text": text,
         "access_token": THREADS_ACCESS_TOKEN,
     }
+    if text or media_type == "TEXT":
+        payload["text"] = text
     if image_url:
         payload["image_url"] = image_url
     if reply_to_id:
@@ -1874,7 +1875,7 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if threads_should_post:
         try:
-            parts = maybe_add_telegram_link(split_text_for_threads(text, source_url=telegram_post_url(message)))
+            parts = [""] if image_url and not text else maybe_add_telegram_link(split_text_for_threads(text, source_url=telegram_post_url(message)))
             total_parts = len(parts)
             logger.info("Telegram message %s split into %s Threads part(s): %s", message.message_id, total_parts, [len(part) for part in parts])
             progress_message = await send_publication_progress(context, preview, total_parts)
@@ -1895,7 +1896,7 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if bluesky_should_post:
         try:
-            bluesky_parts = split_text_for_bluesky(text, source_url=telegram_post_url(message))
+            bluesky_parts = [""] if image_url and not text else split_text_for_bluesky(text, source_url=telegram_post_url(message))
             bluesky_total_parts = len(bluesky_parts)
             logger.info("Telegram message %s split into %s Bluesky part(s): %s", message.message_id, bluesky_total_parts, [len(part) for part in bluesky_parts])
             bluesky_progress_message = await send_publication_progress(context, preview, bluesky_total_parts, platform="Bluesky")
@@ -1967,15 +1968,7 @@ def telegram_message_key(message: Message) -> str:
 def message_was_posted_to_platform(message: Message, platform: str) -> bool:
     key = telegram_message_key(message)
     keys = state.get(f"telegram_{platform}_message_keys", [])
-    if key in keys:
-        return True
-
-    # Before platform-specific tracking existed, the shared list represented
-    # successful Threads/Bluesky handling. Mastodon was added later and must
-    # not inherit those old entries, otherwise its first repost is blocked.
-    if platform in {"threads", "bluesky"}:
-        return message.message_id in state.get("telegram_message_ids", [])
-    return False
+    return key in keys
 
 
 def remember_platform_message(message: Message, platform: str, save: bool = True) -> None:
